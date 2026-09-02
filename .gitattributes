@@ -1,0 +1,2 @@
+# Keep the installer source available without counting it in repository language statistics.
+installer/*.iss -linguist-detectable
