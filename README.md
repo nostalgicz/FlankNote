@@ -25,3 +25,11 @@ Parts of FlankNote's functionality, interaction design, and implementation are a
 - Use .NET 10, C#, and WPF to build the Windows desktop interface, with window layout, themes, and animations implemented primarily through code; Windows Forms is used only for the system tray, monitor information, and file save dialogs.
 
 - Handle window topmost, hit testing, and screen‑edge interaction via Win32 API interop, and use WPF timers to drive the expansion, collapse, and transition animations of the sticky‑note tray.
+
+## 安装
+
+如果不能安装，请在设置里关闭“Smart App Control”选项。
+
+## Install
+
+If can't install, please turn off “Smart App Control” in Settings.

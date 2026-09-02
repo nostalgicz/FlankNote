@@ -13,6 +13,16 @@ class SettingsWindow : Window
     const double HeaderActionWidth = 85;
     const double HeaderActionHeight = 30;
     readonly Slider _font = new() { Minimum = 10, Maximum = 20, TickFrequency = 1, IsSnapToTickEnabled = true };
+    readonly Slider _noteTransparency = new()
+    {
+        Minimum = 0,
+        Maximum = 1,
+        TickFrequency = 0.05,
+        SmallChange = 0.05,
+        LargeChange = 0.10,
+        IsSnapToTickEnabled = true,
+        IsMoveToPointEnabled = true,
+    };
     readonly Slider _wake = new() { Minimum = 16, Maximum = 160, TickFrequency = 8, IsSnapToTickEnabled = true };
     readonly Slider _deckSize = new() { Minimum = 70, Maximum = 180, TickFrequency = 10, IsSnapToTickEnabled = true };
     readonly ComboBox _display = new();
@@ -21,6 +31,7 @@ class SettingsWindow : Window
     bool _launchAtLogin;
     bool _keepDeckOpen;
     bool _openOnHover;
+    bool _autoCollapseNote;
     TextBlock? _tabsMark;
     TextBlock? _chipsMark;
     TextBlock? _leftMark;
@@ -45,6 +56,7 @@ class SettingsWindow : Window
         SnapsToDevicePixels = true;
 
         _font.Value = Settings.NoteFontSize;
+        _noteTransparency.Value = Settings.TransparencyControlValue(Settings.NoteTransparency);
         _wake.Value = Settings.WakeDistance;
         _deckSize.Value = Settings.DeckScale * 100;
         _markdown = Settings.Markdown;
@@ -52,13 +64,34 @@ class SettingsWindow : Window
         _launchAtLogin = StartupRegistration.IsEnabled;
         _keepDeckOpen = Settings.KeepDeckOpen;
         _openOnHover = Settings.OpenOnHover;
+        _autoCollapseNote = Settings.AutoCollapseNote;
 
-        var content = new StackPanel { Margin = new Thickness(26, 22, 26, 22) };
+        // The slim vertical scrollbar consumes 3 DIP on the right. Compensate
+        // that space so the visible content margins remain optically equal.
+        var content = new StackPanel
+        {
+            Margin = new Thickness(26, 22, 6, 22),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
         content.Children.Add(BuildHeading());
 
         var fontValue = ValueText($"{Settings.NoteFontSize:0} pt");
         _font.ValueChanged += (_, _) => fontValue.Text = $"{_font.Value:0} pt";
-        content.Children.Add(Section(Loc.T("NOTES", "便签"), Card(SettingSlider(Loc.T("Text size", "文字大小"), fontValue, _font))));
+        var transparencyValue = ValueText(TransparencyValueText(_noteTransparency.Value));
+        _noteTransparency.ValueChanged += (_, _) =>
+        {
+            transparencyValue.Text = TransparencyValueText(_noteTransparency.Value);
+            Settings.NoteTransparency = Settings.NoteTransparencyFromControl(_noteTransparency.Value);
+            App.OpenNote?.ApplySettings();
+        };
+        var noteRows = new StackPanel();
+        noteRows.Children.Add(SettingSlider(Loc.T("Text size", "文字大小"), fontValue, _font));
+        noteRows.Children.Add(new Border { Height = 16 });
+        noteRows.Children.Add(Divider());
+        noteRows.Children.Add(new Border { Height = 12 });
+        noteRows.Children.Add(SettingBalanceSlider(
+            Loc.T("Note transparency", "便签整体透明度"), transparencyValue, _noteTransparency));
+        content.Children.Add(Section(Loc.T("NOTES", "便签"), Card(noteRows)));
 
         var wakeValue = ValueText($"{Settings.WakeDistance:0} px");
         _wake.ValueChanged += (_, _) => wakeValue.Text = $"{_wake.Value:0} px";
@@ -122,6 +155,13 @@ class SettingsWindow : Window
         {
             _openOnHover = value;
             Settings.OpenOnHover = value;
+        }));
+        options.Children.Add(Divider());
+        options.Children.Add(ToggleRow(Loc.T("Auto-collapse after leaving", "离开后自动收回便签"), () => _autoCollapseNote, value =>
+        {
+            _autoCollapseNote = value;
+            Settings.AutoCollapseNote = value;
+            App.Deck.NoteActivity();
         }));
         options.Children.Add(Divider());
         options.Children.Add(ToggleRow(Loc.T("Markdown styling", "Markdown 样式"), () => _markdown, value => _markdown = value));
@@ -311,6 +351,7 @@ class SettingsWindow : Window
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Content = content,
         };
     }
@@ -329,6 +370,16 @@ class SettingsWindow : Window
         Foreground = UiTheme.Muted,
         HorizontalAlignment = HorizontalAlignment.Right,
     };
+
+    static string TransparencyValueText(double control)
+    {
+        double adjustment = Settings.NoteTransparencyFromControl(control);
+        if (Math.Abs(adjustment) < 0.001)
+            return Loc.T("Default", "默认");
+        return adjustment < 0
+            ? Loc.T("More opaque", "更不透明")
+            : Loc.T("More transparent", "更透明");
+    }
 
     static DataTemplate DisplayItemTemplate()
     {
@@ -387,6 +438,35 @@ class SettingsWindow : Window
         return grid;
     }
 
+    static UIElement SettingBalanceSlider(string label, TextBlock value, Slider slider)
+    {
+        var stack = new StackPanel();
+        stack.Children.Add(SettingSlider(label, value, slider));
+
+        var scale = new Grid { Margin = new Thickness(0, 3, 0, 0) };
+        scale.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        scale.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        scale.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        scale.Children.Add(ScaleLabel(Loc.T("Opaque", "不透明"), HorizontalAlignment.Left, 0));
+        scale.Children.Add(ScaleLabel(Loc.T("Default", "默认"), HorizontalAlignment.Center, 1));
+        scale.Children.Add(ScaleLabel(Loc.T("Transparent", "透明"), HorizontalAlignment.Right, 2));
+        stack.Children.Add(scale);
+        return stack;
+    }
+
+    static TextBlock ScaleLabel(string text, HorizontalAlignment alignment, int column)
+    {
+        var label = new TextBlock
+        {
+            Text = text,
+            FontSize = 10.5,
+            Foreground = UiTheme.Muted,
+            HorizontalAlignment = alignment,
+        };
+        Grid.SetColumn(label, column);
+        return label;
+    }
+
     Border ChoiceRow(string label, bool chips, out TextBlock mark)
     {
         mark = new TextBlock
@@ -411,7 +491,14 @@ class SettingsWindow : Window
         shell.MouseLeave += (_, _) => shell.Background = Brushes.Transparent;
         shell.MouseLeftButtonUp += (_, _) =>
         {
-            Settings.DeckStyle = chips ? "chips" : "tabs";
+            string style = chips ? "chips" : "tabs";
+            if (Settings.DeckStyle == style)
+            {
+                RefreshDeckChoice();
+                return;
+            }
+            Settings.DeckStyle = style;
+            NotesStore.I.Save();
             RefreshDeckChoice();
             App.Deck.ApplySettings();
         };
@@ -586,10 +673,12 @@ class SettingsWindow : Window
     void PersistSettings()
     {
         Settings.NoteFontSize = _font.Value;
+        Settings.NoteTransparency = Settings.NoteTransparencyFromControl(_noteTransparency.Value);
         Settings.WakeDistance = _wake.Value;
         Settings.DeckScale = _deckSize.Value / 100;
         Settings.KeepDeckOpen = _keepDeckOpen;
         Settings.OpenOnHover = _openOnHover;
+        Settings.AutoCollapseNote = _autoCollapseNote;
         Settings.Markdown = _markdown;
         Settings.OverlayFullscreen = _overlay;
         StartupRegistration.SetEnabled(_launchAtLogin);

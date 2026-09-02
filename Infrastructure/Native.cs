@@ -11,8 +11,18 @@ static class Native
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WM_HOTKEY = 0x0312;
     public const int WM_NCHITTEST = 0x0084;
+    public const int WM_ENTERSIZEMOVE = 0x0231;
+    public const int WM_EXITSIZEMOVE = 0x0232;
     public const int HTTRANSPARENT = -1;
     public const int HTCLIENT = 1;
+    public const int HTLEFT = 10;
+    public const int HTRIGHT = 11;
+    public const int HTTOP = 12;
+    public const int HTTOPLEFT = 13;
+    public const int HTTOPRIGHT = 14;
+    public const int HTBOTTOM = 15;
+    public const int HTBOTTOMLEFT = 16;
+    public const int HTBOTTOMRIGHT = 17;
     public const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_WIN = 0x8;
     public static readonly IntPtr HWND_TOPMOST = new(-1);
     const uint SWP_NOSIZE = 0x0001;

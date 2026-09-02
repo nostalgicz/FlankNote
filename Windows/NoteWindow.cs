@@ -22,6 +22,7 @@ class NoteWindow : Window
     readonly Note _note;
     readonly DeckWindow _deck;
     readonly bool _onRight;
+    readonly Rect _workArea;
     readonly RichTextBox _body;
     readonly TextBox _title;
     readonly TextBlock _saved;
@@ -31,6 +32,7 @@ class NoteWindow : Window
     bool _closing;
     bool _settingTitle;
     bool _titleEdited;
+    bool _modalUiOpen;
 
     // find bar
     readonly Grid _findBar = new();
@@ -42,16 +44,24 @@ class NoteWindow : Window
     // palette sync: everything coloured by the note's palette gets refreshed together
     readonly List<Border> _headBtns = [];
     readonly List<Ellipse> _dots = [];
+    Border? _customColourButton;
     TextBlock? _gutterTitle;
+    Grid? _gutterLabelHost;
     Rectangle? _rule;
+    Path? _resizeGrip;
     Border? _gutter;
     readonly ScaleTransform _sheetScale = new(0.965, 0.965);
     DispatcherTimer? _transition;
+    DispatcherTimer? _deactivationCheck;
+    bool _nativeResizing;
+    bool _clampingBounds;
 
     public bool Pinned => _note.Pinned;
+    public bool HasModalInteraction => _modalUiOpen;
     public string NoteId => _note.Id;
     bool OnRight => _onRight;
     NoteColor Pal => _note.Palette;
+    double ConfiguredOpacity => 1 - Math.Max(0, Settings.ClampNoteTransparency(Settings.NoteTransparency));
 
     static void Log(string s)
     {
@@ -59,24 +69,34 @@ class NoteWindow : Window
     }
     SolidColorBrush DimBrush => new(Pal.Ink) { Opacity = 0.35 };
 
-    public NoteWindow(Note note, DeckWindow deck, Point pos)
+    public NoteWindow(Note note, DeckWindow deck, Point pos, Size windowSize, Rect workArea)
     {
         _note = note;
         _deck = deck;
         _onRight = !Settings.EdgeLeft;
+        _workArea = workArea;
         Title = note.DisplayTitle;
 
-        Width = Geom.EditorWidth + 16;          // + shadow room
-        Height = Geom.EditorHeight + 16;
+        var limits = Geom.WindowSizeLimits(workArea);
+        Width = windowSize.Width;
+        Height = windowSize.Height;
+        MinWidth = limits.Min.Width;
+        MinHeight = limits.Min.Height;
+        MaxWidth = limits.Max.Width;
+        MaxHeight = limits.Max.Height;
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
         Opacity = 0;
         Topmost = true;
         ShowInTaskbar = false;
-        ResizeMode = ResizeMode.NoResize;
+        ResizeMode = ResizeMode.CanResize;
 
-        SourceInitialized += (_, _) => Native.EnsureTopmost(this);
+        SourceInitialized += (_, _) =>
+        {
+            Native.EnsureTopmost(this);
+            HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(WindowHook);
+        };
         Activated += (_, _) => Native.EnsureTopmost(this);
         Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
@@ -149,6 +169,27 @@ class NoteWindow : Window
         Grid.SetColumn(rule, 1);
         grid.Children.Add(rule);
 
+        _resizeGrip = new Path
+        {
+            Data = Geometry.Parse(OnRight
+                ? "M2,10 L10,2 M2,7 L7,2 M5,10 L10,5"
+                : "M2,2 L10,10 M5,2 L10,7 M2,5 L7,10"),
+            Stroke = new SolidColorBrush(Pal.Ink) { Opacity = 0.24 },
+            StrokeThickness = 1,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            Width = 12,
+            Height = 12,
+            Stretch = Stretch.None,
+            HorizontalAlignment = OnRight ? HorizontalAlignment.Left : HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = OnRight ? new Thickness(4, 0, 0, 4) : new Thickness(0, 0, 4, 4),
+            IsHitTestVisible = false,
+        };
+        Grid.SetColumn(_resizeGrip, gutterCol);
+        Panel.SetZIndex(_resizeGrip, 2);
+        grid.Children.Add(_resizeGrip);
+
         // ── header + body ─────────────────────────────────
         var stack = new Grid();
         stack.RowDefinitions.Add(new RowDefinition { Height = new GridLength(32) });
@@ -200,6 +241,9 @@ class NoteWindow : Window
         headTools.Children.Add(_pinBtn);
         headTools.Children.Add(ToolBtn("\uE8FD", (_, _) => ToggleTaskAtCaret(), square: true, symbol: true));
         headTools.Children.Add(ToolBtn("\uE721", (_, _) => ToggleFindBar(), square: true, symbol: true));
+        var resetSize = ToolBtn("\uE73F", (_, _) => ResetWindowSize(), square: true, symbol: true);
+        resetSize.ToolTip = Loc.T("Restore default size", "恢复当前便签的默认大小");
+        headTools.Children.Add(resetSize);
         Grid.SetColumn(headTools, 2);
         head.Children.Add(headTools);
         stack.Children.Add(head);
@@ -256,6 +300,8 @@ class NoteWindow : Window
         foot.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var dots = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         for (int i = 0; i < NoteColor.All.Length; i++) dots.Children.Add(ColorDot(i));
+        _customColourButton = CustomColourButton();
+        dots.Children.Add(_customColourButton);
         Grid.SetColumn(dots, 0);
         foot.Children.Add(dots);
         var btns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -282,8 +328,110 @@ class NoteWindow : Window
         // slide in from the deck, level with its tab
         Left = pos.X + (OnRight ? 40 : -40);
         Top = pos.Y;
+        SizeChanged += (_, _) =>
+        {
+            UpdateGutterLabelBounds();
+            if (_nativeResizing) ClampToWorkArea();
+        };
+        LocationChanged += (_, _) =>
+        {
+            if (_nativeResizing) ClampToWorkArea();
+        };
         UpdateTitle();
         UpdateSavedState();
+    }
+
+    IntPtr WindowHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == Native.WM_ENTERSIZEMOVE)
+        {
+            _nativeResizing = true;
+            _deck.NoteActivity();
+            return IntPtr.Zero;
+        }
+        if (msg == Native.WM_EXITSIZEMOVE)
+        {
+            _nativeResizing = false;
+            ClampToWorkArea();
+            PersistWindowSize(save: true);
+            Native.EnsureTopmost(this);
+            return IntPtr.Zero;
+        }
+        if (msg != Native.WM_NCHITTEST)
+            return IntPtr.Zero;
+        if (_closing || _transition != null)
+        {
+            handled = true;
+            return new IntPtr(Native.HTCLIENT);
+        }
+
+        long packed = lParam.ToInt64();
+        var client = PointFromScreen(new Point(
+            unchecked((short)(packed & 0xFFFF)),
+            unchecked((short)((packed >> 16) & 0xFFFF))));
+        int hit = ResizeHitTest(OnRight, new Size(ActualWidth, ActualHeight), client);
+        handled = true;
+        return new IntPtr(hit);
+    }
+
+    internal static int ResizeHitTest(
+        bool onRight, Size size, Point client, double edgeGrip = 11, double innerGrip = 22)
+    {
+        bool top = client.Y >= 0 && client.Y <= edgeGrip;
+        bool bottom = client.Y <= size.Height && client.Y >= size.Height - edgeGrip;
+        bool innerEdge = onRight
+            ? client.X >= 0 && client.X <= innerGrip
+            : client.X <= size.Width && client.X >= size.Width - innerGrip;
+
+        int hit = 0;
+        if (innerEdge && top) hit = onRight ? Native.HTTOPLEFT : Native.HTTOPRIGHT;
+        else if (innerEdge && bottom) hit = onRight ? Native.HTBOTTOMLEFT : Native.HTBOTTOMRIGHT;
+        else if (innerEdge) hit = onRight ? Native.HTLEFT : Native.HTRIGHT;
+        else if (top) hit = Native.HTTOP;
+        else if (bottom) hit = Native.HTBOTTOM;
+        return hit == 0 ? Native.HTCLIENT : hit;
+    }
+
+    void ClampToWorkArea()
+    {
+        if (_clampingBounds) return;
+        _clampingBounds = true;
+        try
+        {
+            Width = Math.Clamp(Width, MinWidth, MaxWidth);
+            Height = Math.Clamp(Height, MinHeight, MaxHeight);
+            Left = OnRight ? _workArea.Right - Width + 8 : _workArea.Left - 8;
+            Top = Math.Clamp(Top, _workArea.Top - 8, _workArea.Bottom - Height + 8);
+        }
+        finally { _clampingBounds = false; }
+    }
+
+    void PersistWindowSize(bool save = false)
+    {
+        if (!double.IsFinite(Width) || !double.IsFinite(Height)) return;
+        _note.WindowWidth = Math.Round(Math.Clamp(Width, MinWidth, MaxWidth), 1);
+        _note.WindowHeight = Math.Round(Math.Clamp(Height, MinHeight, MaxHeight), 1);
+        if (save) NotesStore.I.Save();
+    }
+
+    void ResetWindowSize()
+    {
+        if (_closing || _nativeResizing) return;
+        var size = Geom.DefaultWindowSize(_workArea);
+        Width = size.Width;
+        Height = size.Height;
+        ClampToWorkArea();
+        PersistWindowSize(save: true);
+        _deck.NoteActivity();
+        Native.EnsureTopmost(this);
+        _body.Focus();
+    }
+
+    void UpdateGutterLabelBounds()
+    {
+        double available = Math.Max(1, Height - Geom.WindowInset);
+        if (_gutterLabelHost != null) _gutterLabelHost.Height = available;
+        if (_gutterTitle != null) _gutterTitle.MaxWidth = Math.Max(1, available - 12);
     }
 
     // ── visual helpers ──────────────────────────────────────
@@ -312,7 +460,10 @@ class NoteWindow : Window
 
     Brush PaperBrush()
     {
-        var bottom = Color.FromArgb(224, Pal.Paper.R, Pal.Paper.G, Pal.Paper.B);
+        double opaqueBoost = Math.Clamp(
+            -Settings.ClampNoteTransparency(Settings.NoteTransparency) / 0.70, 0, 1);
+        byte bottomAlpha = (byte)Math.Round(224 + 31 * opaqueBoost);
+        var bottom = Color.FromArgb(bottomAlpha, Pal.Paper.R, Pal.Paper.G, Pal.Paper.B);
         return new LinearGradientBrush(
             new GradientStopCollection
             {
@@ -345,14 +496,14 @@ class NoteWindow : Window
             Left = fromLeft + (targetLeft - fromLeft) * spring;
             double scale = fromScale + (1 - fromScale) * spring;
             _sheetScale.ScaleX = _sheetScale.ScaleY = scale;
-            Opacity = Math.Min(1, p * 1.8);
+            Opacity = ConfiguredOpacity * Math.Min(1, p * 1.8);
             if (p >= 1)
             {
                 timer.Stop();
                 if (_transition == timer) _transition = null;
                 Left = targetLeft;
                 _sheetScale.ScaleX = _sheetScale.ScaleY = 1;
-                Opacity = 1;
+                Opacity = ConfiguredOpacity;
             }
         };
         _transition = timer;
@@ -396,7 +547,7 @@ class NoteWindow : Window
         // Same size as the deck tabs (10.5 Bold) — long titles ellipsise, they
         // don't shrink, so the open note and the hidden deck read identically
         var title = LimitTextElements(_note.DisplayTitle.ToUpperInvariant(), 24);
-        double avail = Height - 16 - 12;                       // vertical room for the rotated label
+        double avail = Height - Geom.WindowInset - 12;         // vertical room for the rotated label
         double size = 9.5;
 
         var tb = new TextBlock
@@ -419,10 +570,11 @@ class NoteWindow : Window
         var host = new Grid
         {
             Width = 30,
-            Height = Height - 16,
+            Height = Height - Geom.WindowInset,
             UseLayoutRounding = true,
             SnapsToDevicePixels = true,
         };
+        _gutterLabelHost = host;
         host.Children.Add(tb);
         return host;
     }
@@ -472,9 +624,12 @@ class NoteWindow : Window
         {
             Width = 11, Height = 11,
             Fill = pal.DashB,
-            Stroke = i == _note.Color ? new SolidColorBrush(Pal.Ink) { Opacity = 0.55 } : null,
+            Stroke = !_note.HasCustomColor && i == _note.Color
+                ? new SolidColorBrush(Pal.Ink) { Opacity = 0.55 }
+                : null,
             StrokeThickness = 1.5,
             Cursor = Cursors.Hand,
+            ToolTip = Loc.ColourName(pal.Name),
             // left 10 clears the dashed rule (the original's footer pads 14pt);
             // top 4 lines the dots up with the action buttons; 1px gaps
             Margin = i == 0 ? new Thickness(14, 0, 7, 0) : new Thickness(0, 0, 7, 0),
@@ -490,13 +645,77 @@ class NoteWindow : Window
     {
         try
         {
-            if (_note.Color == i) return;
+            if (_note.Color == i && !_note.HasCustomColor) return;
             _note.Color = i;
-            NotesStore.I.Save();
+            _note.CustomColor = null;
+            NotesStore.I.Update(_note);
             RebuildVisual();                    // recolour the whole note together
             _body.Focus();
         }
         catch (Exception ex) { Log($"[SetColor EX] {ex}"); }
+    }
+
+    Border CustomColourButton()
+    {
+        var swatch = new Ellipse
+        {
+            Width = 12,
+            Height = 12,
+            Fill = UiTheme.ColourSpectrum,
+            Stroke = new SolidColorBrush(Colors.White) { Opacity = 0.75 },
+            StrokeThickness = 0.7,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var button = new Border
+        {
+            Width = 22,
+            Height = 22,
+            Margin = new Thickness(0, 0, 7, 0),
+            CornerRadius = new CornerRadius(11),
+            BorderThickness = new Thickness(1.5),
+            BorderBrush = _note.HasCustomColor
+                ? new SolidColorBrush(Pal.Ink) { Opacity = 0.55 }
+                : Brushes.Transparent,
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            ToolTip = Loc.T("Custom colour…", "自定义颜色…"),
+            Child = swatch,
+        };
+        button.MouseEnter += (_, _) =>
+            button.Background = new SolidColorBrush(Pal.Ink) { Opacity = 0.12 };
+        button.MouseLeave += (_, _) => button.Background = Brushes.Transparent;
+        button.MouseLeftButtonUp += (_, e) =>
+        {
+            ChooseCustomColour();
+            e.Handled = true;
+        };
+        return button;
+    }
+
+    void ChooseCustomColour()
+    {
+        _modalUiOpen = true;
+        StopDeactivationCheck();
+        try
+        {
+            var initial = NoteColor.TryParse(_note.CustomColor, out var custom)
+                ? custom
+                : Pal.Dash;
+            var selected = ColourPickerDialog.Show(this, initial);
+            if (selected is not { } color) return;
+            _note.CustomColor = NoteColor.ToHex(color);
+            NotesStore.I.Update(_note);
+            RebuildVisual();
+        }
+        catch (Exception ex) { Log($"[ChooseCustomColour EX] {ex}"); }
+        finally
+        {
+            _modalUiOpen = false;
+            Native.EnsureTopmost(this);
+            Activate();
+            _body.Focus();
+        }
     }
 
     void BuildFindBar()
@@ -552,6 +771,7 @@ class NoteWindow : Window
 
     public void Save()
     {
+        PersistWindowSize();
         var sb = new System.Text.StringBuilder();
         foreach (Block b in _body.Document.Blocks)
             if (b is Paragraph p)
@@ -743,31 +963,56 @@ class NoteWindow : Window
     // ── lifecycle ──────────────────────────────────────────
     void OnDeactivated()
     {
-        if (_closing || _note.Pinned) return;
+        if (_closing || _note.Pinned || _modalUiOpen || IsActive)
+        {
+            StopDeactivationCheck();
+            return;
+        }
         // A real outside click can occur during the activation-settling window.
         // Delay the decision, rather than discarding that deactivation forever.
         double age = (DateTime.Now - _createdAt).TotalMilliseconds;
         if (age < 600)
         {
-            var delayed = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromMilliseconds(Math.Max(40, 610 - age)),
-            };
-            delayed.Tick += (_, _) =>
-            {
-                delayed.Stop();
-                if (!IsActive) OnDeactivated();
-            };
-            delayed.Start();
+            ScheduleDeactivationCheck(Math.Max(40, 610 - age));
             return;
         }
 
         // The deck is the one legitimate non-note foreground window: its tab
-        // click is allowed to finish and explicitly switch notes. Settings,
-        // All Notes and every external window count as outside the note.
+        // click is allowed to finish and explicitly switch notes. Foreground
+        // ownership can remain transiently on the deck, so keep checking until
+        // Windows reports the settled target instead of dropping the event.
         var fg = Native.GetForegroundWindow();
-        if (new WindowInteropHelper(_deck).Handle == fg) return;
+        var noteHandle = new WindowInteropHelper(this).Handle;
+        var deckHandle = new WindowInteropHelper(_deck).Handle;
+        if (fg == IntPtr.Zero || fg == noteHandle || fg == deckHandle)
+        {
+            ScheduleDeactivationCheck(140);
+            return;
+        }
         Dismiss();
+    }
+
+    void ScheduleDeactivationCheck(double delayMilliseconds)
+    {
+        StopDeactivationCheck();
+        var timer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(delayMilliseconds),
+        };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            if (_deactivationCheck == timer) _deactivationCheck = null;
+            OnDeactivated();
+        };
+        _deactivationCheck = timer;
+        timer.Start();
+    }
+
+    void StopDeactivationCheck()
+    {
+        _deactivationCheck?.Stop();
+        _deactivationCheck = null;
     }
 
     public void Dismiss()                       // click-away / idle → the whole deck goes to sleep
@@ -775,6 +1020,7 @@ class NoteWindow : Window
         if (_closing) return;
         Save();
         _closing = true;
+        StopDeactivationCheck();
         AnimateOut(_deck.DismissAll);
     }
 
@@ -783,6 +1029,7 @@ class NoteWindow : Window
     {
         if (!_closing) Save();
         _closing = true;
+        StopDeactivationCheck();
         _transition?.Stop();
         IsHitTestVisible = false;
         if (IsVisible) Close();
@@ -794,6 +1041,7 @@ class NoteWindow : Window
         if (_closing) return;
         Save();
         _closing = true;
+        StopDeactivationCheck();
         AnimateOut(() => _deck.NoteClosed(this));
     }
 
@@ -829,6 +1077,7 @@ class NoteWindow : Window
         var doomed = _note;
         NotesStore.I.Delete(_note.Id);
         _closing = true;
+        StopDeactivationCheck();
         _transition?.Stop();
         Close();
         _deck.NoteClosed(this);
@@ -843,6 +1092,7 @@ class NoteWindow : Window
         var doomed = _note;
         NotesStore.I.Archive(_note.Id);
         _closing = true;
+        StopDeactivationCheck();
         _transition?.Stop();
         Close();
         _deck.NoteClosed(this);
@@ -865,19 +1115,31 @@ class NoteWindow : Window
         _findCount.Foreground = new SolidColorBrush(Pal.Ink) { Opacity = 0.45 };
         if (_gutterTitle != null) _gutterTitle.Foreground = new SolidColorBrush(Pal.Ink) { Opacity = 0.70 };
         if (_rule != null) _rule.Stroke = new SolidColorBrush(Pal.Ink) { Opacity = 0.18 };
+        if (_resizeGrip != null) _resizeGrip.Stroke = new SolidColorBrush(Pal.Ink) { Opacity = 0.24 };
         ApplyPinState();
         foreach (var b in _headBtns)
+        {
             if (b.Child is TextBlock t && b != _pinBtn)
                 t.Foreground = new SolidColorBrush(Pal.Ink) { Opacity = b.Height == 20 ? 0.72 : 0.50 };
+            if (b.Height == 20 && !b.IsMouseOver)
+                b.Background = new SolidColorBrush(Pal.Ink) { Opacity = 0.08 };
+        }
         for (int i = 0; i < _dots.Count; i++)
-            _dots[i].Stroke = i == _note.Color ? new SolidColorBrush(Pal.Ink) { Opacity = 0.55 } : null;
+            _dots[i].Stroke = !_note.HasCustomColor && i == _note.Color
+                ? new SolidColorBrush(Pal.Ink) { Opacity = 0.55 }
+                : null;
+        if (_customColourButton != null)
+            _customColourButton.BorderBrush = _note.HasCustomColor
+                ? new SolidColorBrush(Pal.Ink) { Opacity = 0.55 }
+                : Brushes.Transparent;
         ApplyMarkdown();
     }
 
-    /// <summary>Live-apply settings (font size, markdown on/off) to an open note.</summary>
+    /// <summary>Live-apply settings to an open note.</summary>
     public void ApplySettings()
     {
         _body.FontSize = Settings.NoteFontSize;
-        ApplyMarkdown();
+        Opacity = ConfiguredOpacity;
+        RebuildVisual();
     }
 }

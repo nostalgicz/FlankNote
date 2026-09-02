@@ -8,11 +8,14 @@ namespace FlankNote;
 /// <summary>Small first-run setup for the settings needed before the deck is useful.</summary>
 class FirstRunWindow : Window
 {
-    readonly ComboBox _display = new();
-    readonly Border _leftChoice;
-    readonly Border _rightChoice;
-    readonly TextBlock _leftMark;
-    readonly TextBlock _rightMark;
+    readonly ContentControl _contentHost = new()
+    {
+        HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        VerticalContentAlignment = VerticalAlignment.Stretch,
+    };
+    ComboBox _display = null!;
+    TextBlock _leftMark = null!;
+    TextBlock _rightMark = null!;
     string _language;
     bool _edgeLeft;
 
@@ -21,7 +24,6 @@ class FirstRunWindow : Window
         _language = Settings.Language is "zh" or "en" ? Settings.Language : "en";
         _edgeLeft = Settings.EdgeLeft;
 
-        Title = Loc.T("Welcome to FlankNote", "欢迎使用 FlankNote");
         Width = 470;
         Height = 580;
         MinWidth = 430;
@@ -32,6 +34,28 @@ class FirstRunWindow : Window
         FontFamily = UiTheme.Font;
         UseLayoutRounding = true;
         SnapsToDevicePixels = true;
+
+        Title = Loc.T("Welcome to FlankNote", "欢迎使用 FlankNote");
+        Content = UiTheme.WithWindowChrome(this, Title, _contentHost);
+        BuildContent();
+        DisplayService.CenterOnSelected(this);
+
+        Show();
+
+        // Show() returning means the one-time welcome opened successfully. Save
+        // immediately, before the dispatcher can process a user close action.
+        Settings.FirstRunCompleted = true;
+        NotesStore.I.Save();
+        Activate();
+    }
+
+    void BuildContent()
+    {
+        string selectedDisplay = _display?.SelectedItem is DisplayOption current
+            ? current.DeviceName
+            : Settings.DisplayName;
+
+        Title = Loc.T("Welcome to FlankNote", "欢迎使用 FlankNote");
 
         var content = new StackPanel { Margin = new Thickness(28, 24, 28, 24) };
         content.Children.Add(new TextBlock
@@ -68,10 +92,11 @@ class FirstRunWindow : Window
         content.Children.Add(Section(Loc.T("LANGUAGE", "语言"), Card(languageRows, padding: 4)));
 
         var displays = DisplayService.Options();
+        _display = new ComboBox();
         _display.ItemsSource = displays;
         _display.ItemTemplate = DisplayItemTemplate();
         _display.SelectedItem = displays.FirstOrDefault(d =>
-                string.Equals(d.DeviceName, Settings.DisplayName, StringComparison.OrdinalIgnoreCase))
+                string.Equals(d.DeviceName, selectedDisplay, StringComparison.OrdinalIgnoreCase))
             ?? displays.FirstOrDefault(d =>
                 string.Equals(d.DeviceName, System.Windows.Forms.Screen.PrimaryScreen?.DeviceName, StringComparison.OrdinalIgnoreCase))
             ?? displays.FirstOrDefault();
@@ -81,11 +106,11 @@ class FirstRunWindow : Window
         UiTheme.StyleComboBox(_display);
         content.Children.Add(Section(Loc.T("DISPLAY", "显示器"), Card(_display)));
 
-        _leftChoice = EdgeChoice(Loc.T("Left edge", "左侧"), true, out _leftMark);
-        _rightChoice = EdgeChoice(Loc.T("Right edge", "右侧"), false, out _rightMark);
+        var leftChoice = EdgeChoice(Loc.T("Left edge", "左侧"), true, out _leftMark);
+        var rightChoice = EdgeChoice(Loc.T("Right edge", "右侧"), false, out _rightMark);
         var edgeRows = new StackPanel { Orientation = Orientation.Horizontal };
-        edgeRows.Children.Add(_leftChoice);
-        edgeRows.Children.Add(_rightChoice);
+        edgeRows.Children.Add(leftChoice);
+        edgeRows.Children.Add(rightChoice);
         content.Children.Add(Section(Loc.T("DOCK SIDE", "停靠位置"), Card(edgeRows, padding: 4)));
         RefreshEdgeChoice();
 
@@ -107,16 +132,7 @@ class FirstRunWindow : Window
         finish.MouseLeftButtonUp += (_, _) => Finish();
         content.Children.Add(finish);
 
-        Content = UiTheme.WithWindowChrome(this, Title, content);
-        DisplayService.CenterOnSelected(this);
-
-        Show();
-
-        // Show() returning means the one-time welcome opened successfully. Save
-        // immediately, before the dispatcher can process a user close action.
-        Settings.FirstRunCompleted = true;
-        NotesStore.I.Save();
-        Activate();
+        _contentHost.Content = content;
     }
 
     Border LanguageChoice(string label, string language)
@@ -146,17 +162,18 @@ class FirstRunWindow : Window
             CornerRadius = UiTheme.ControlRadius,
             Cursor = Cursors.Hand,
             Child = row,
-            Tag = (language, mark),
         };
         shell.MouseEnter += (_, _) => shell.Background = UiTheme.Window;
         shell.MouseLeave += (_, _) => shell.Background = Brushes.Transparent;
         shell.MouseLeftButtonUp += (_, _) =>
         {
+            if (_language == language) return;
             _language = language;
-            if (shell.Parent is Panel parent)
-                foreach (var candidate in parent.Children.OfType<Border>())
-                    if (candidate.Tag is ValueTuple<string, TextBlock> choice)
-                        choice.Item2.Text = _language == choice.Item1 ? "●" : "";
+            Settings.Language = language;
+            NotesStore.I.Save();
+            App.Tray?.RefreshMenu();
+            App.Deck.Refresh();
+            BuildContent();
         };
         return shell;
     }

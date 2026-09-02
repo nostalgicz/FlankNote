@@ -315,7 +315,7 @@ class AllNotesWindow : Window
                 Margin = new Thickness(colorIndex == 0 ? 0 : 2, 0, 0, 0),
                 CornerRadius = new CornerRadius(15),
                 BorderThickness = new Thickness(1.5),
-                BorderBrush = colorIndex == note.Color
+                BorderBrush = !note.HasCustomColor && colorIndex == note.Color
                     ? new SolidColorBrush(palette.Ink) { Opacity = 0.55 }
                     : Brushes.Transparent,
                 Background = Brushes.Transparent,
@@ -330,6 +330,7 @@ class AllNotesWindow : Window
             choice.MouseLeftButtonUp += (_, e) =>
             {
                 note.Color = colorIndex;
+                note.CustomColor = null;
                 NotesStore.I.Update(note);
                 UpdateColourSwatch(note.Palette);
                 StyleBody();
@@ -339,6 +340,63 @@ class AllNotesWindow : Window
             };
             paletteRow.Children.Add(choice);
         }
+
+        paletteRow.Children.Add(new Border
+        {
+            Width = 1,
+            Height = 16,
+            Margin = new Thickness(7, 0, 7, 0),
+            Background = Hairline,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        var customSwatch = new Ellipse
+        {
+            Width = 15,
+            Height = 15,
+            Fill = UiTheme.ColourSpectrum,
+            Stroke = new SolidColorBrush(Colors.White) { Opacity = 0.8 },
+            StrokeThickness = 0.8,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var customChoice = new Border
+        {
+            Width = 29,
+            Height = 29,
+            CornerRadius = new CornerRadius(15),
+            BorderThickness = new Thickness(1.5),
+            BorderBrush = note.HasCustomColor
+                ? new SolidColorBrush(note.Palette.Ink) { Opacity = 0.55 }
+                : Brushes.Transparent,
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            ToolTip = Loc.T("Custom colour…", "自定义颜色…"),
+            Child = customSwatch,
+        };
+        customChoice.MouseEnter += (_, _) => customChoice.Background = WindowBg;
+        customChoice.MouseLeave += (_, _) => customChoice.Background = Brushes.Transparent;
+        customChoice.MouseLeftButtonUp += (_, e) =>
+        {
+            _colourPopup.IsOpen = false;
+            try
+            {
+                var initial = NoteColor.TryParse(note.CustomColor, out var custom)
+                    ? custom
+                    : note.Palette.Dash;
+                var selected = ColourPickerDialog.Show(this, initial);
+                if (selected is { } color)
+                {
+                    note.CustomColor = NoteColor.ToHex(color);
+                    NotesStore.I.Update(note);
+                    UpdateColourSwatch(note.Palette);
+                    StyleBody();
+                    RefreshList();
+                }
+            }
+            catch (Exception ex) { Log($"Custom colour EX {ex}"); }
+            e.Handled = true;
+        };
+        paletteRow.Children.Add(customChoice);
 
         _colourPopup.Child = new Border
         {
@@ -353,7 +411,7 @@ class AllNotesWindow : Window
         };
         _colourPopup.PlacementTarget = _colorBtn;
         _colourPopup.Placement = PlacementMode.Top;
-        _colourPopup.HorizontalOffset = -178;
+        _colourPopup.HorizontalOffset = -210;
         _colourPopup.IsOpen = true;
     }
 

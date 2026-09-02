@@ -21,6 +21,22 @@ static class UiTheme
         return brush;
     }
 
+    static LinearGradientBrush MakeSpectrum()
+    {
+        var brush = new LinearGradientBrush(
+            new GradientStopCollection
+            {
+                new(Color.FromRgb(0xE6, 0x4A, 0x4A), 0),
+                new(Color.FromRgb(0xE5, 0xB8, 0x3E), 0.24),
+                new(Color.FromRgb(0x43, 0xA0, 0x62), 0.48),
+                new(Color.FromRgb(0x3D, 0x7E, 0xD6), 0.72),
+                new(Color.FromRgb(0xA5, 0x55, 0xC7), 1),
+            },
+            new Point(0, 0.5), new Point(1, 0.5));
+        brush.Freeze();
+        return brush;
+    }
+
     public static readonly SolidColorBrush Window = Make(0xF5F4F0);
     public static readonly SolidColorBrush Surface = Make(0xFFFFFF);
     public static readonly SolidColorBrush Text = Make(0x262626);
@@ -29,6 +45,7 @@ static class UiTheme
     public static readonly SolidColorBrush Selection = Make(0xDDD9CF);
     public static readonly SolidColorBrush Accent = Make(0x3E6258);
     public static readonly SolidColorBrush Danger = Make(0xB8473F);
+    public static readonly Brush ColourSpectrum = MakeSpectrum();
 
     public static readonly FontFamily Font = new("Segoe UI, Microsoft YaHei UI");
     public static readonly FontFamily Symbols = new("Segoe Fluent Icons, Segoe MDL2 Assets");
@@ -82,7 +99,7 @@ static class UiTheme
         var bar = new Grid { Background = Window };
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        bar.Children.Add(new TextBlock
+        var titleText = new TextBlock
         {
             Text = title,
             FontFamily = Font,
@@ -92,7 +109,10 @@ static class UiTheme
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(16, 0, 8, 0),
             TextTrimming = TextTrimming.CharacterEllipsis,
-        });
+        };
+        titleText.SetBinding(TextBlock.TextProperty,
+            new Binding(nameof(System.Windows.Window.Title)) { Source = window });
+        bar.Children.Add(titleText);
 
         var controls = new StackPanel
         {

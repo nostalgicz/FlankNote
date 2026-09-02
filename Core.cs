@@ -15,6 +15,15 @@ record struct NoteColor(string Name, Color Paper, Color Dash, Color Ink)
 {
     static Color Hex(uint v) => Color.FromRgb((byte)(v >> 16), (byte)(v >> 8), (byte)v);
 
+    static Color Blend(Color from, Color to, double amount)
+    {
+        amount = Math.Clamp(amount, 0, 1);
+        return Color.FromRgb(
+            (byte)Math.Round(from.R + (to.R - from.R) * amount),
+            (byte)Math.Round(from.G + (to.G - from.G) * amount),
+            (byte)Math.Round(from.B + (to.B - from.B) * amount));
+    }
+
     public static readonly NoteColor[] All =
     [
         new("Lemon", Hex(0xFCE795), Hex(0xE0AD08), Hex(0x3A3008)),
@@ -29,6 +38,31 @@ record struct NoteColor(string Name, Color Paper, Color Dash, Color Ink)
     ];
 
     public static NoteColor At(int i) => All[((i % All.Length) + All.Length) % All.Length];
+
+    public static bool TryParse(string? value, out Color color)
+    {
+        color = default;
+        if (value is not { Length: 7 } || value[0] != '#'
+            || !uint.TryParse(value.AsSpan(1), NumberStyles.HexNumber,
+                CultureInfo.InvariantCulture, out uint rgb)) return false;
+        color = Hex(rgb);
+        return true;
+    }
+
+    public static bool TryCustom(string? value, out NoteColor palette)
+    {
+        palette = default;
+        if (!TryParse(value, out var accent)) return false;
+
+        double luminance = (0.2126 * accent.R + 0.7152 * accent.G + 0.0722 * accent.B) / 255;
+        var paper = Blend(accent, Colors.White, luminance < 0.25 ? 0.65 : 0.55);
+        var dash = luminance > 0.82 ? Blend(accent, Colors.Black, 0.16) : accent;
+        var ink = Blend(dash, Colors.Black, 0.80);
+        palette = new NoteColor("Custom", paper, dash, ink);
+        return true;
+    }
+
+    public static string ToHex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
 
     public SolidColorBrush PaperB => new(Paper);
     public SolidColorBrush DashB => new(Dash);
@@ -46,6 +80,9 @@ class Note
     public bool HasCustomTitle { get; set; }
     public string Body { get; set; } = "";
     public int Color { get; set; }
+    public string? CustomColor { get; set; }
+    public double WindowWidth { get; set; } = Geom.EditorWidth + Geom.WindowInset;
+    public double WindowHeight { get; set; } = Geom.EditorHeight + Geom.WindowInset;
     public bool Pinned { get; set; }
     public bool Archived { get; set; }
     public DateTime Created { get; set; } = DateTime.Now;
@@ -54,7 +91,11 @@ class Note
 
     // Computed — brushes and derived text must not be serialized
     [System.Text.Json.Serialization.JsonIgnore]
-    public NoteColor Palette => NoteColor.At(Color);
+    public NoteColor Palette => NoteColor.TryCustom(CustomColor, out var custom)
+        ? custom
+        : NoteColor.At(Color);
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasCustomColor => NoteColor.TryCustom(CustomColor, out _);
     [System.Text.Json.Serialization.JsonIgnore]
     public string DisplayTitle => Title.Length == 0 ? "New note" : Title;
 
@@ -110,7 +151,28 @@ class NotesStore
         _filePath = Path.Combine(_dir, "notes.json");
     }
 
-    class Root { public List<Note> notes { get; set; } = []; public string edge { get; set; } = "right"; public string display { get; set; } = ""; public double fontSize { get; set; } = 14; public string deckStyle { get; set; } = "tabs"; public double deckScale { get; set; } = 1; public bool keepDeckOpen { get; set; } public bool openOnHover { get; set; } public double wakeDistance { get; set; } = 40; public bool markdown { get; set; } = true; public bool overlayFullscreen { get; set; } = true; public string language { get; set; } = "en"; public bool? firstRunCompleted { get; set; } public int? firstRunVersion { get; set; } }
+    class Root
+    {
+        public List<Note> notes { get; set; } = [];
+        public string edge { get; set; } = "right";
+        public string display { get; set; } = "";
+        public double fontSize { get; set; } = 14;
+        public double? noteTransparency { get; set; }
+        [System.Text.Json.Serialization.JsonIgnore(
+            Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        public double? noteOpacity { get; set; }
+        public string deckStyle { get; set; } = "tabs";
+        public double deckScale { get; set; } = 1;
+        public bool keepDeckOpen { get; set; }
+        public bool openOnHover { get; set; }
+        public bool autoCollapseNote { get; set; }
+        public double wakeDistance { get; set; } = 40;
+        public bool markdown { get; set; } = true;
+        public bool overlayFullscreen { get; set; } = true;
+        public string language { get; set; } = "en";
+        public bool? firstRunCompleted { get; set; }
+        public int? firstRunVersion { get; set; }
+    }
 
     public void Load()
     {
@@ -126,10 +188,16 @@ class NotesStore
                 Settings.EdgeLeft = root?.edge == "left";
                 Settings.DisplayName = root?.display ?? "";
                 Settings.NoteFontSize = root?.fontSize is > 0 ? root.fontSize : 14;
+                Settings.NoteTransparency = root?.noteTransparency is { } transparency
+                    ? Settings.ClampNoteTransparency(transparency)
+                    : root?.noteOpacity is { } legacyOpacity
+                        ? Settings.ClampNoteTransparency(1 - Math.Clamp(legacyOpacity, 0, 1))
+                        : 0;
                 if (root?.deckStyle is "tabs" or "chips") Settings.DeckStyle = root.deckStyle;
                 Settings.DeckScale = root?.deckScale is >= 0.7 and <= 1.8 ? root.deckScale : 1;
                 Settings.KeepDeckOpen = root?.keepDeckOpen ?? false;
                 Settings.OpenOnHover = root?.openOnHover ?? false;
+                Settings.AutoCollapseNote = root?.autoCollapseNote ?? false;
                 Settings.WakeDistance = root?.wakeDistance is > 0 ? root.wakeDistance : 40;
                 Settings.Markdown = root?.markdown ?? true;
                 Settings.OverlayFullscreen = root?.overlayFullscreen ?? true;
@@ -176,10 +244,12 @@ class NotesStore
                 edge = Settings.EdgeLeft ? "left" : "right",
                 display = Settings.DisplayName,
                 fontSize = Settings.NoteFontSize,
+                noteTransparency = Settings.ClampNoteTransparency(Settings.NoteTransparency),
                 deckStyle = Settings.DeckStyle,
                 deckScale = Settings.DeckScale,
                 keepDeckOpen = Settings.KeepDeckOpen,
                 openOnHover = Settings.OpenOnHover,
+                autoCollapseNote = Settings.AutoCollapseNote,
                 wakeDistance = Settings.WakeDistance,
                 markdown = Settings.Markdown,
                 overlayFullscreen = Settings.OverlayFullscreen,
@@ -310,15 +380,34 @@ static class Settings
     public static bool EdgeLeft = false;
     public static string DisplayName = "";
     public static double NoteFontSize = 14;
+    // Signed adjustment around the original material: negative values make
+    // the paper/gutter more opaque, positive values fade the whole window.
+    public static double NoteTransparency;
     public static string DeckStyle = "tabs";        // "tabs" | "chips" (colour chips, no labels)
     public static double DeckScale = 1;              // 0.7 ... 1.8
     public static bool KeepDeckOpen = false;         // fan is the resting state
     public static bool OpenOnHover = false;          // dwell on a tab to open it
+    public static bool AutoCollapseNote = false;     // close an unpinned note after leaving its interaction area
     public static double WakeDistance = 40;         // how close to the edge the pointer wakes the deck (DIP)
     public static bool Markdown = true;             // markdown-as-you-type styling
     public static bool OverlayFullscreen = true;    // stay on top of full-screen apps
     public static string Language = "en";           // "en" | "zh"
     public static bool FirstRunCompleted;
+
+    public static double ClampNoteTransparency(double value)
+        => double.IsFinite(value) ? Math.Clamp(value, -0.70, 0.70) : 0;
+
+    public static double TransparencyControlValue(double transparency)
+    {
+        double value = ClampNoteTransparency(transparency);
+        return (value + 0.70) / 1.40;
+    }
+
+    public static double NoteTransparencyFromControl(double control)
+    {
+        if (!double.IsFinite(control)) return 0;
+        return ClampNoteTransparency(Math.Clamp(control, 0, 1) * 1.40 - 0.70);
+    }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -348,6 +437,9 @@ static class Geom
     public static double PlusGap => 13 * S;
     public const double HeightBudget = 0.68;   // share of the deck window's height the fan may fill
     public const double EditorWidth = 460, EditorHeight = 380, GutterWidth = 36;
+    public const double WindowInset = 16;
+    public const double WindowMinWidth = 400, WindowMaxWidth = 776;
+    public const double WindowMinHeight = 150, WindowMaxHeight = 776;
     public static double TabHeightMax => 118 * S;   // original value (tabHeightMax)
 
     public static double PillHeight(int noteCount)
@@ -355,6 +447,38 @@ static class Geom
         int shown = Math.Min(noteCount, MaxDashes);
         int n = Math.Max(1, shown + (noteCount > MaxDashes ? 1 : 0));
         return PillPad * 2 + n * DashHeight + (n - 1) * DashGap;
+    }
+
+    public static (Size Min, Size Max) WindowSizeLimits(Rect workArea)
+    {
+        double availableWidth = Math.Max(280, workArea.Width - 24);
+        double availableHeight = Math.Max(220, workArea.Height - 24);
+        double minWidth = Math.Min(WindowMinWidth, availableWidth);
+        double minHeight = Math.Min(WindowMinHeight, availableHeight);
+        double maxWidth = Math.Max(minWidth, Math.Min(WindowMaxWidth, availableWidth));
+        double maxHeight = Math.Max(minHeight, Math.Min(WindowMaxHeight, availableHeight));
+        return (new Size(minWidth, minHeight), new Size(maxWidth, maxHeight));
+    }
+
+    public static Size DefaultWindowSize(Rect workArea)
+    {
+        var limits = WindowSizeLimits(workArea);
+        return new Size(
+            Math.Clamp(EditorWidth + WindowInset, limits.Min.Width, limits.Max.Width),
+            Math.Clamp(EditorHeight + WindowInset, limits.Min.Height, limits.Max.Height));
+    }
+
+    public static Size WindowSize(Note note, Rect workArea)
+    {
+        var limits = WindowSizeLimits(workArea);
+        var defaults = DefaultWindowSize(workArea);
+        double requestedWidth = double.IsFinite(note.WindowWidth) && note.WindowWidth > 0
+            ? note.WindowWidth : defaults.Width;
+        double requestedHeight = double.IsFinite(note.WindowHeight) && note.WindowHeight > 0
+            ? note.WindowHeight : defaults.Height;
+        return new Size(
+            Math.Clamp(requestedWidth, limits.Min.Width, limits.Max.Width),
+            Math.Clamp(requestedHeight, limits.Min.Height, limits.Max.Height));
     }
 
     public record struct FanLayout(double Pitch, double ItemHeight, double FanTop);

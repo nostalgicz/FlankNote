@@ -38,6 +38,8 @@ class DeckWindow : Window
     readonly DispatcherTimer _poll = new() { Interval = TimeSpan.FromMilliseconds(80) };
     DateTime _lastActivity = DateTime.Now;
     DateTime _lastNoteActivity = DateTime.Now;
+    DateTime? _outsideNoteSince;
+    bool _pointerVisitedNoteArea;
     Point _lastCursor;
     bool _noteOpen;
     bool _showAll;   // the "+N" tab expands the deck to every note
@@ -110,6 +112,20 @@ class DeckWindow : Window
         Native.GetCursorPos(out var p);
         var tr = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice;
         return tr?.Transform(new Point(p.X, p.Y)) ?? new Point(p.X, p.Y);
+    }
+
+    static bool ContainsPointer(Window window, Point point, double margin = 8)
+    {
+        if (!window.IsVisible) return false;
+        double width = window.ActualWidth > 0 ? window.ActualWidth : window.Width;
+        double height = window.ActualHeight > 0 ? window.ActualHeight : window.Height;
+        if (!double.IsFinite(window.Left) || !double.IsFinite(window.Top)
+            || !double.IsFinite(width) || !double.IsFinite(height)) return false;
+        return new Rect(
+            window.Left - margin,
+            window.Top - margin,
+            width + margin * 2,
+            height + margin * 2).Contains(point);
     }
 
     void LayoutRest()
@@ -266,7 +282,8 @@ class DeckWindow : Window
     void Poll()
     {
         var cur = CursorDip();
-        if (cur != _lastCursor) { _lastCursor = cur; _lastActivity = DateTime.Now; }
+        var now = DateTime.Now;
+        if (cur != _lastCursor) { _lastCursor = cur; _lastActivity = now; }
 
         if (Settings.KeepDeckOpen && _state == DeckState.Rest)
         {
@@ -286,7 +303,7 @@ class DeckWindow : Window
         }
         else if (!_noteOpen && !Settings.KeepDeckOpen)
         {
-            var idle = DateTime.Now - _lastActivity;
+            var idle = now - _lastActivity;
             // inside the fanned window (on the tabs or their whitespace) the deck
             // stays open no matter how long the pointer rests — idle-folding there
             // would collapse to the pill, re-expand, and flicker forever
@@ -299,11 +316,45 @@ class DeckWindow : Window
             else if (idle.TotalMilliseconds > 150) SetState(DeckState.Rest);      // pointer left → sleep
         }
 
-        // An open, unpinned note tidies itself away after a minute without
-        // interaction with that note. Global pointer movement must not extend it.
-        if (_noteOpen && App.OpenNote is { } nw && !nw.Pinned &&
-            (DateTime.Now - _lastNoteActivity).TotalSeconds > 60)
-            nw.Dismiss();
+        if (_noteOpen && App.OpenNote is { } nw && !nw.Pinned && !nw.HasModalInteraction)
+        {
+            if (Settings.AutoCollapseNote)
+            {
+                bool insideInteractionArea = ContainsPointer(this, cur) || ContainsPointer(nw, cur);
+                if (insideInteractionArea)
+                {
+                    _pointerVisitedNoteArea = true;
+                    _outsideNoteSince = null;
+                }
+                else if (_pointerVisitedNoteArea)
+                {
+                    _outsideNoteSince ??= now;
+                    if ((now - _outsideNoteSince.Value).TotalMilliseconds >= 700)
+                    {
+                        _outsideNoteSince = null;
+                        nw.Dismiss();
+                        return;
+                    }
+                }
+                else
+                    _outsideNoteSince = null;
+            }
+            else
+            {
+                _outsideNoteSince = null;
+                _pointerVisitedNoteArea = false;
+            }
+
+            // An open note also tidies itself away after a minute without note
+            // interaction. Global pointer movement must not extend this timeout.
+            if ((now - _lastNoteActivity).TotalSeconds > 60)
+                nw.Dismiss();
+        }
+        else
+        {
+            _outsideNoteSince = null;
+            _pointerVisitedNoteArea = false;
+        }
     }
 
     public void ApplyOverlay()                  // Settings.OverlayFullscreen → always-on-top behaviour
@@ -1015,6 +1066,8 @@ class DeckWindow : Window
         }
         App.OpenNote = null;
         _noteOpen = true;
+        _outsideNoteSince = null;
+        _pointerVisitedNoteArea = false;
         NoteActivity();
         SetState(DeckState.Fan);
 
@@ -1022,12 +1075,14 @@ class DeckWindow : Window
         int idx = Math.Max(0, notes.FindIndex(n => n.Id == note.Id));
         var lay = Geom.Fan(Work.Height, Math.Max(1, notes.Count), LongestLabel(notes), false);
         var w = Work;
+        var windowSize = Geom.WindowSize(note, w);
         double tabCenterY = Top + lay.FanTop + idx * lay.Pitch + lay.ItemHeight / 2;
         // the sheet's edge side runs flush to the screen edge (covers its own tab)
-        double left = OnRight ? w.Right - Geom.EditorWidth - 8 : w.Left - 8;
-        double top = Math.Clamp(tabCenterY - Geom.EditorHeight / 2, w.Top + 10, w.Bottom - Geom.EditorHeight - 10);
+        double left = OnRight ? w.Right - windowSize.Width + 8 : w.Left - 8;
+        double top = Math.Clamp(tabCenterY - windowSize.Height / 2,
+            w.Top + 2, w.Bottom - windowSize.Height - 2);
 
-        App.OpenNote = new NoteWindow(note, this, new Point(left, top));
+        App.OpenNote = new NoteWindow(note, this, new Point(left, top), windowSize, w);
         var nw = App.OpenNote;
         nw.Show();
         nw.Activate();   // best effort — foreground lock may refuse on a no-activate click path
@@ -1040,16 +1095,24 @@ class DeckWindow : Window
         {
             App.OpenNote = null;
             _noteOpen = false;
+            _outsideNoteSince = null;
+            _pointerVisitedNoteArea = false;
         }
     }
 
-    public void NoteActivity() => _lastNoteActivity = DateTime.Now;
+    public void NoteActivity()
+    {
+        _lastNoteActivity = DateTime.Now;
+        _outsideNoteSince = null;
+    }
 
     public void DismissAll()
     {
         App.OpenNote?.CloseImmediately();
         App.OpenNote = null;
         _noteOpen = false;
+        _outsideNoteSince = null;
+        _pointerVisitedNoteArea = false;
         SetState(DeckState.Rest);
     }
 
