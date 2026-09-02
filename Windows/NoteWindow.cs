@@ -88,22 +88,22 @@ class NoteWindow : Window
         AllowsTransparency = true;
         Background = Brushes.Transparent;
         Opacity = 0;
-        Topmost = true;
+        Topmost = Settings.OverlayFullscreen;
         ShowInTaskbar = false;
         ResizeMode = ResizeMode.CanResize;
 
         SourceInitialized += (_, _) =>
         {
-            Native.EnsureTopmost(this);
+            ApplyOverlay();
             HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(WindowHook);
         };
-        Activated += (_, _) => Native.EnsureTopmost(this);
+        Activated += (_, _) => ReassertOverlay();
         Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
-            Native.EnsureTopmost(this);
+            ReassertOverlay();
             OnDeactivated();
         }));
-        PreviewMouseDown += (_, _) => { Native.EnsureTopmost(this); _deck.NoteActivity(); };
+        PreviewMouseDown += (_, _) => { ReassertOverlay(); _deck.NoteActivity(); };
         PreviewMouseMove += (_, _) => _deck.NoteActivity();
         PreviewKeyDown += OnKey;        // Esc only — all custom shortcuts disabled on request
 
@@ -354,7 +354,7 @@ class NoteWindow : Window
             _nativeResizing = false;
             ClampToWorkArea();
             PersistWindowSize(save: true);
-            Native.EnsureTopmost(this);
+            ReassertOverlay();
             return IntPtr.Zero;
         }
         if (msg != Native.WM_NCHITTEST)
@@ -423,7 +423,7 @@ class NoteWindow : Window
         ClampToWorkArea();
         PersistWindowSize(save: true);
         _deck.NoteActivity();
-        Native.EnsureTopmost(this);
+        ReassertOverlay();
         _body.Focus();
     }
 
@@ -712,7 +712,7 @@ class NoteWindow : Window
         finally
         {
             _modalUiOpen = false;
-            Native.EnsureTopmost(this);
+            ReassertOverlay();
             Activate();
             _body.Focus();
         }
@@ -1051,7 +1051,7 @@ class NoteWindow : Window
         {
             _note.Pinned = !_note.Pinned;
             ApplyPinState();
-            if (_note.Pinned) Native.EnsureTopmost(this);
+            ReassertOverlay();
             NotesStore.I.Save();
         }
         catch (Exception ex) { Log($"[TogglePin EX] {ex}"); }
@@ -1141,5 +1141,19 @@ class NoteWindow : Window
         _body.FontSize = Settings.NoteFontSize;
         Opacity = ConfiguredOpacity;
         RebuildVisual();
+    }
+
+    /// <summary>Apply the user-selected window layer to an open note.</summary>
+    public void ApplyOverlay()
+    {
+        bool enabled = Settings.OverlayFullscreen;
+        Topmost = enabled;
+        Native.SetTopmost(this, enabled);
+    }
+
+    void ReassertOverlay()
+    {
+        if (Settings.OverlayFullscreen)
+            Native.EnsureTopmost(this);
     }
 }

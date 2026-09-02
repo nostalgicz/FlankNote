@@ -350,6 +350,30 @@ public sealed class CoreLogicTests
     }
 
     [Fact]
+    public void OverlayFullscreenPreferenceSurvivesRestart()
+    {
+        var directory = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), "FlankNote.Tests", System.Guid.NewGuid().ToString("N"));
+        var previous = Settings.OverlayFullscreen;
+        try
+        {
+            Settings.OverlayFullscreen = false;
+            new NotesStore(directory).Save();
+            Settings.OverlayFullscreen = true;
+
+            new NotesStore(directory).Load();
+
+            Assert.False(Settings.OverlayFullscreen);
+        }
+        finally
+        {
+            Settings.OverlayFullscreen = previous;
+            if (System.IO.Directory.Exists(directory))
+                System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ParsesLatestReleaseFromGitHubAtomFeed()
     {
         var document = System.Xml.Linq.XDocument.Parse("""

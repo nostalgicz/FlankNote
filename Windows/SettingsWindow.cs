@@ -686,6 +686,7 @@ class SettingsWindow : Window
         App.Deck.ApplySettings();
         App.Deck.ApplyOverlay();
         App.OpenNote?.ApplySettings();
+        App.OpenNote?.ApplyOverlay();
     }
 
     void ChangeLanguage(string language)

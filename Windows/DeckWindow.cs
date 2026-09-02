@@ -60,7 +60,7 @@ class DeckWindow : Window
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
-        Topmost = true;
+        Topmost = Settings.OverlayFullscreen;
         ShowInTaskbar = false;
         ShowActivated = false;
         ResizeMode = ResizeMode.NoResize;
@@ -77,7 +77,7 @@ class DeckWindow : Window
         SourceInitialized += (_, _) =>
         {
             Native.NoActivate(this);
-            Native.EnsureTopmost(this);
+            ApplyOverlay();
             HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)!.AddHook(HitTest);
         };
         MouseEnter += (_, _) => { _lastActivity = DateTime.Now; SetState(DeckState.Fan); };
@@ -359,11 +359,9 @@ class DeckWindow : Window
 
     public void ApplyOverlay()                  // Settings.OverlayFullscreen → always-on-top behaviour
     {
-        // The deck must always remain above ordinary application windows.
-        // Windows has no direct equivalent of macOS' separate floating/statusBar
-        // levels, so the full-screen preference must not demote it to a normal window.
-        Topmost = true;
-        Native.EnsureTopmost(this);
+        bool enabled = Settings.OverlayFullscreen;
+        Topmost = enabled;
+        Native.SetTopmost(this, enabled);
     }
 
     // ── content: pill ───────────────────────────────────────

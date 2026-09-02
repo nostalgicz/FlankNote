@@ -25,6 +25,7 @@ static class Native
     public const int HTBOTTOMRIGHT = 17;
     public const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_WIN = 0x8;
     public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public static readonly IntPtr HWND_NOTOPMOST = new(-2);
     const uint SWP_NOSIZE = 0x0001;
     const uint SWP_NOMOVE = 0x0002;
     const uint SWP_NOACTIVATE = 0x0010;
@@ -54,10 +55,14 @@ static class Native
 
     /// <summary>Reassert the native topmost band without moving, resizing or activating.</summary>
     public static void EnsureTopmost(Window w)
+        => SetTopmost(w, true);
+
+    /// <summary>Apply or remove the native topmost band without moving, resizing or activating.</summary>
+    public static void SetTopmost(Window w, bool topmost)
     {
         var h = new WindowInteropHelper(w).Handle;
         if (h == IntPtr.Zero) return;
-        SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
+        SetWindowPos(h, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
 }
