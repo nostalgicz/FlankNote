@@ -1,0 +1,54 @@
+# Commit the application source and release inputs:
+# - App.xaml, App.xaml.cs, Core.cs, FlankNote.csproj, app.manifest
+# - Infrastructure/, Services/, Windows/, Properties/
+# - tests/, installer/, scripts/
+# - icon.ico, icon.png, README.md, LICENSE, THIRD-PARTY-NOTICES.md
+
+# .NET build and publish output
+[Bb]in/
+[Oo]bj/
+[Aa]rtifacts/
+
+# Test output
+[Tt]est[Rr]esults/
+*.trx
+coverage/
+coverage.*
+
+# Visual Studio, Rider and VS Code user state
+.vs/
+.idea/
+.vscode/
+_ReSharper*/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+*.pubxml.user
+
+# Local secrets and signing certificates
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+*.snk
+
+# Logs, temporary files and operating-system metadata
+*.log
+*.tmp
+*.bak
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# NuGet packages are restored from project files
+packages/
+*.nupkg
+
+# Unused logo design drafts; the application uses icon.ico and icon.png
+/flanknote-logo-*
