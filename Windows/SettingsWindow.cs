@@ -166,7 +166,7 @@ class SettingsWindow : Window
         options.Children.Add(Divider());
         options.Children.Add(ToggleRow(Loc.T("Markdown styling", "Markdown 样式"), () => _markdown, value => _markdown = value));
         options.Children.Add(Divider());
-        options.Children.Add(ToggleRow(Loc.T("Show over full-screen apps", "覆盖全屏应用"), () => _overlay, value => _overlay = value));
+        options.Children.Add(ToggleRow(Loc.T("Show over full-screen apps", "应用显示前最前"), () => _overlay, value => _overlay = value));
         options.Children.Add(Divider());
         options.Children.Add(ToggleRow(Loc.T("Launch at sign-in", "开机自启"), () => _launchAtLogin, value => _launchAtLogin = value));
         content.Children.Add(Section(Loc.T("BEHAVIOUR", "行为"), Card(options, padding: 3)));
