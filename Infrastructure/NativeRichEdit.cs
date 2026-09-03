@@ -260,7 +260,16 @@ sealed class NativeRichEdit : HwndHost
     public void FocusEditor()
     {
         Focus();
-        if (_handle != IntPtr.Zero) NativeMethods.SetFocus(_handle);
+        if (_handle != IntPtr.Zero)
+        {
+            // Reassert the editable state here as well as during creation.
+            // WPF can recreate an HwndHost child while a note is being shown,
+            // and a recreated RichEdit otherwise inherits a transient read-only
+            // state from the old native handle.
+            NativeMethods.EnableWindow(_handle, true);
+            NativeMethods.SendMessage(_handle, EM_SETREADONLY, IntPtr.Zero, IntPtr.Zero);
+            NativeMethods.SetFocus(_handle);
+        }
     }
 
     public void Select(int start, int length)
@@ -549,6 +558,7 @@ sealed class NativeRichEdit : HwndHost
             IntPtr instance, IntPtr param);
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool DestroyWindow(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern IntPtr SetFocus(IntPtr hwnd);
+        [DllImport("user32.dll")] internal static extern bool EnableWindow(IntPtr hwnd, bool enable);
         [DllImport("user32.dll")] internal static extern short GetKeyState(int key);
         [DllImport("user32.dll")] internal static extern bool TranslateMessage(ref MSG msg);
         [DllImport("user32.dll")] internal static extern IntPtr DispatchMessage(ref MSG msg);
