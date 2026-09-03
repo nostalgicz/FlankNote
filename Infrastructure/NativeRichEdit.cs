@@ -131,13 +131,17 @@ sealed class NativeRichEdit : HwndHost
 
     public int SelectionStart
     {
-        get { GetSelection(out int start, out _); return start; }
+        get { GetSelection(out int start, out _); return ToLogicalOffset(start); }
         set { SetSelection(value, SelectionLength); }
     }
 
     public int SelectionLength
     {
-        get { GetSelection(out int start, out int end); return Math.Max(0, end - start); }
+        get
+        {
+            GetSelection(out int start, out int end);
+            return Math.Max(0, ToLogicalOffset(end) - ToLogicalOffset(start));
+        }
         set { SetSelection(SelectionStart, value); }
     }
 
@@ -297,13 +301,53 @@ sealed class NativeRichEdit : HwndHost
     void SetSelection(int start, int end)
     {
         if (_handle == IntPtr.Zero) return;
-        int max = Text.Length;
+        int max = GetTextLength();
         var range = new CHARRANGE
         {
-            cpMin = Math.Clamp(start, 0, max),
-            cpMax = Math.Clamp(end, 0, max),
+            cpMin = Math.Clamp(ToNativeOffset(start), 0, max),
+            cpMax = Math.Clamp(ToNativeOffset(end), 0, max),
         };
         NativeMethods.SendMessage(_handle, EM_EXSETSEL, IntPtr.Zero, ref range);
+    }
+
+    int ToNativeOffset(int logicalOffset)
+    {
+        string text = Text;
+        logicalOffset = Math.Clamp(logicalOffset, 0, text.Length);
+        int native = logicalOffset;
+        for (int i = 0; i < logicalOffset; i++)
+            if (text[i] == '\n') native++;
+        return native;
+    }
+
+    int ToLogicalOffset(int nativeOffset)
+    {
+        string text = RawText();
+        nativeOffset = Math.Clamp(nativeOffset, 0, text.Length);
+        int logical = 0;
+        for (int i = 0; i < nativeOffset; i++)
+        {
+            if (text[i] == '\r' && i + 1 < nativeOffset && text[i + 1] == '\n')
+                continue;
+            logical++;
+        }
+        return logical;
+    }
+
+    string RawText()
+    {
+        if (_handle == IntPtr.Zero) return _pendingText.Replace("\n", "\r\n", StringComparison.Ordinal);
+        int length = GetTextLength();
+        if (length <= 0) return string.Empty;
+        var buffer = new StringBuilder(length + 1);
+        var request = new GETTEXTEX
+        {
+            cb = buffer.Capacity * 2,
+            flags = GT_USECRLF,
+            codepage = 1200,
+        };
+        NativeMethods.SendMessage(_handle, EM_GETTEXTEX, ref request, buffer);
+        return buffer.ToString();
     }
 
     NativeCharFormat ToNative(NativeCharFormat value) => value;
