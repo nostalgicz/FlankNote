@@ -131,8 +131,11 @@ static class NativeMarkdownStyler
 
         var bullet = Bullet.Match(line);
         if (bullet.Success)
-            Hide(editor, offset + bullet.Groups["marker"].Index,
-                bullet.Groups["marker"].Length + bullet.Groups["space"].Length);
+            // RichEdit does not synthesize a replacement glyph when a source
+            // marker is hidden, so keep the marker visible and styled.
+            Format(editor, offset + bullet.Groups["marker"].Index,
+                bullet.Groups["marker"].Length, NativeFormatKind.Marker, dash,
+                baseSize: baseSize);
 
         var ordered = Ordered.Match(line);
         if (ordered.Success)
