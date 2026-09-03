@@ -13,8 +13,8 @@ namespace FlankNote;
 
 /// <summary>
 ///  The open note: a paper sheet level with its own tab, carrying the tab
-///  along as a gutter separated by a dashed rule.  Markdown is styled in place
-///  (markers dimmed, never hidden — stored text is exactly what you typed),
+///  along as a gutter separated by a dashed rule. Markdown is styled in place;
+///  the caret line exposes its source markers while other lines are rendered,
 ///  tasks live inline as ☐/☑ prefixes, and Ctrl+F finds within the note.
 /// </summary>
 class NoteWindow : Window
@@ -27,6 +27,7 @@ class NoteWindow : Window
     readonly TextBox _title;
     readonly TextBlock _saved;
     readonly Border _pinBtn;
+    readonly Border _modeBtn;
     readonly DispatcherTimer _autosave = new() { Interval = TimeSpan.FromMilliseconds(250) };
     readonly DateTime _createdAt = DateTime.Now;
     bool _closing;
@@ -55,6 +56,7 @@ class NoteWindow : Window
     DispatcherTimer? _deactivationCheck;
     bool _nativeResizing;
     bool _clampingBounds;
+    Paragraph? _editingMarkdownParagraph;
 
     public bool Pinned => _note.Pinned;
     public bool HasModalInteraction => _modalUiOpen;
@@ -239,6 +241,10 @@ class NoteWindow : Window
         };
         _pinBtn = ToolBtn("\uE718", (_, _) => TogglePin(), square: true, symbol: true);
         headTools.Children.Add(_pinBtn);
+        _modeBtn = ToolBtn(_note.UsesMarkdown ? "MD" : "TXT", (_, _) => ToggleTextMode(), subtle: true);
+        _modeBtn.Width = 34;
+        UpdateModeButton();
+        headTools.Children.Add(_modeBtn);
         headTools.Children.Add(ToolBtn("\uE8FD", (_, _) => ToggleTaskAtCaret(), square: true, symbol: true));
         headTools.Children.Add(ToolBtn("\uE721", (_, _) => ToggleFindBar(), square: true, symbol: true));
         var resetSize = ToolBtn("\uE73F", (_, _) => ResetWindowSize(), square: true, symbol: true);
@@ -248,7 +254,7 @@ class NoteWindow : Window
         head.Children.Add(headTools);
         stack.Children.Add(head);
 
-        // the editor: RichTextBox so markdown can be styled in place
+        // One editor provides as-you-type Markdown: only the caret line exposes source markers.
         _body = new RichTextBox
         {
             Background = Brushes.Transparent,
@@ -274,15 +280,16 @@ class NoteWindow : Window
         ApplyMarkdown();
         _body.TextChanged += (_, _) =>
         {
+            if (_applyingMarkdown) return;
             _deck.NoteActivity();
-            ApplyMarkdown();
+            ApplyMarkdownIfLineChanged();
             _autosave.Stop(); _autosave.Start();
             if (_findBar.Visibility == Visibility.Visible) RefreshFindMatches();
         };
-        _body.SelectionChanged += (_, _) =>
-        {
-            if (Settings.Markdown && !_applyingMarkdown) ApplyMarkdown();
-        };
+        _body.SelectionChanged += (_, _) => ApplyMarkdownIfLineChanged();
+        _body.GotKeyboardFocus += (_, _) => ApplyMarkdown();
+        _body.LostKeyboardFocus += (_, _) =>
+            Dispatcher.BeginInvoke(new Action(ApplyMarkdown));
         _autosave.Tick += (_, _) => { _autosave.Stop(); Save(); };
         _body.PreviewMouseLeftButtonDown += OnBodyMouseDown;
 
@@ -769,14 +776,19 @@ class NoteWindow : Window
             _body.Document.Blocks.Add(new Paragraph(new Run(line.TrimEnd('\r'))) { Margin = new Thickness(0) });
     }
 
-    public void Save()
+    string BodyText()
     {
-        PersistWindowSize();
         var sb = new System.Text.StringBuilder();
         foreach (Block b in _body.Document.Blocks)
             if (b is Paragraph p)
-                sb.Append(new TextRange(p.ContentStart, p.ContentEnd).Text).Append('\n');
-        _note.Body = sb.ToString().TrimEnd('\n');
+                sb.Append(Markdown.SourceText(p)).Append('\n');
+        return sb.ToString().TrimEnd('\n');
+    }
+
+    public void Save()
+    {
+        PersistWindowSize();
+        _note.Body = BodyText();
         if (_titleEdited)
         {
             var title = _title.Text.Trim();
@@ -796,9 +808,43 @@ class NoteWindow : Window
         UpdateSavedState();
     }
 
+    void ToggleTextMode()
+    {
+        Save();
+        _note.MarkdownEnabled = !_note.UsesMarkdown;
+        _body.Focus();
+        ApplyMarkdown();
+        NotesStore.I.Update(_note);
+        UpdateModeButton();
+        UpdateTitle();
+        UpdateSavedState();
+        _deck.NoteActivity();
+    }
+
+    void UpdateModeButton()
+    {
+        if (_modeBtn.Child is not TextBlock label) return;
+        bool markdown = _note.UsesMarkdown;
+        label.Text = markdown ? "MD" : "TXT";
+        _modeBtn.ToolTip = markdown
+            ? Loc.T("Markdown mode. Click for plain text.", "Markdown 模式，点击切换到纯文本。")
+            : Loc.T("Plain text mode. Click for Markdown.", "纯文本模式，点击切换到 Markdown。 ");
+    }
+
     bool _applyingMarkdown;
 
-    // ── markdown styling, applied on every edit ────────────
+    Paragraph? CurrentEditingParagraph()
+        => _body.IsKeyboardFocusWithin
+            ? Markdown.ParagraphAt(_body.CaretPosition)
+            : null;
+
+    void ApplyMarkdownIfLineChanged()
+    {
+        if (!ReferenceEquals(CurrentEditingParagraph(), _editingMarkdownParagraph))
+            ApplyMarkdown();
+    }
+
+    // The caret line stays as plain source; all other lines render in place.
     void ApplyMarkdown()
     {
         if (_applyingMarkdown) return;   // re-entrancy guard: caret/format writes
@@ -806,23 +852,9 @@ class NoteWindow : Window
         _applyingMarkdown = true;
         try
         {
-            // Settings.Markdown off → plain text, no in-place styling
-            if (!Settings.Markdown)
-            {
-                var plainDoc = _body.Document;
-                var plainAll = new TextRange(plainDoc.ContentStart, plainDoc.ContentEnd);
-                plainAll.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Normal);
-                plainAll.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Normal);
-                plainAll.ApplyPropertyValue(TextElement.FontFamilyProperty, new FontFamily("Segoe UI, Microsoft YaHei UI"));
-                plainAll.ApplyPropertyValue(TextElement.ForegroundProperty, Pal.InkB);
-                plainAll.ApplyPropertyValue(TextElement.FontSizeProperty, Settings.NoteFontSize);
-                plainAll.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
-                plainAll.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
-                Markdown.ClearBlockStyles(plainDoc);
-                return;
-            }
-
             if (_body.Document == null) return;
+            var editingParagraph = CurrentEditingParagraph();
+            _editingMarkdownParagraph = editingParagraph;
             var doc = _body.Document;
             var all = new TextRange(doc.ContentStart, doc.ContentEnd);
             all.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Normal);
@@ -832,12 +864,17 @@ class NoteWindow : Window
             all.ApplyPropertyValue(TextElement.FontSizeProperty, Settings.NoteFontSize);
             all.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
             all.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
-
-            Markdown.StyleDocument(doc, Pal, Settings.NoteFontSize,
-                Markdown.ParagraphAt(_body.CaretPosition));
+            if (_note.UsesMarkdown)
+                Markdown.StyleDocument(doc, Pal, Settings.NoteFontSize,
+                    editingParagraph);
+            else
+                Markdown.RestoreSourceMarkers(doc);
         }
         catch (Exception ex) { Log($"[ApplyMarkdown EX] {ex}"); }
-        finally { _applyingMarkdown = false; }
+        finally
+        {
+            _applyingMarkdown = false;
+        }
     }
 
     // ── tasks ──────────────────────────────────────────────
@@ -852,7 +889,10 @@ class NoteWindow : Window
             if (p == null) return;
             var text = new TextRange(p.ContentStart, p.ContentEnd).Text;
             if (text.Trim().Length == 0) { ReplaceParagraphText(p, "☐ "); return; }
-            string nl = Tasks.IsTask(text) ? Tasks.Toggle(text) : "☐ " + text;
+            bool isNativeTask = text.StartsWith(Tasks.Open + " ") || text.StartsWith(Tasks.Done + " ");
+            string nl = isNativeTask || (_note.UsesMarkdown && Tasks.IsTask(text))
+                ? Tasks.Toggle(text)
+                : "☐ " + text;
             ReplaceParagraphText(p, nl);
         }
         catch (Exception ex) { Log($"[ToggleTaskAtCaret EX] {ex}"); }
@@ -867,19 +907,9 @@ class NoteWindow : Window
 
     void OnBodyMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (Markdown.TryOpenLink(_body, e)) return;
-        var pos = _body.GetPositionFromPoint(e.GetPosition(_body), true);
-        var p = Markdown.ParagraphAt(pos);
-        if (pos == null || p == null) return;
-        var text = new TextRange(p.ContentStart, p.ContentEnd).Text;
-        if (!Tasks.IsTask(text)) return;
-        // clicked within the first two characters (the box and its space)
-        int offset = new TextRange(p.ContentStart, pos).Text.Length;
-        if (offset <= 1)
-        {
-            ReplaceParagraphText(p, Tasks.Toggle(text));
-            e.Handled = true;
-        }
+        if (Markdown.TryOpenLink(_body, e, _note.UsesMarkdown)) return;
+        if (Markdown.TryToggleTaskAtPoint(_body, e, _note.UsesMarkdown))
+            _deck.NoteActivity();
     }
 
     // ── find (Ctrl+F) ──────────────────────────────────────
@@ -906,7 +936,7 @@ class NoteWindow : Window
             foreach (Block b in _body.Document.Blocks)
             {
                 if (b is not Paragraph p) continue;
-                var t = new TextRange(p.ContentStart, p.ContentEnd).Text;
+                var t = Markdown.SourceText(p);
                 int i = 0;
                 while ((i = t.IndexOf(q, i, StringComparison.CurrentCultureIgnoreCase)) >= 0)
                 {
@@ -948,7 +978,7 @@ class NoteWindow : Window
     void OnKey(object sender, KeyEventArgs e)
     {
         _deck.NoteActivity();
-        if (e.Key == Key.Return && Markdown.HandleTaskReturn(_body))
+        if (e.Key == Key.Return && Markdown.HandleTaskReturn(_body, _note.UsesMarkdown))
         {
             e.Handled = true;
             return;

@@ -745,9 +745,7 @@ class DeckWindow : Window
     void ShowPreview(FrameworkElement target, Note note)
     {
         HidePreview();
-        var progress = Tasks.Progress(note.Body);
-        var text = note.Body.Replace("\r", "").Replace("\n", " ").Trim();
-        if (text.Length > 150) text = text[..150] + "…";
+        var progress = Tasks.Progress(note.Body, note.UsesMarkdown);
         var pal = note.Palette;
         var paper = new LinearGradientBrush(
             new GradientStopCollection
@@ -767,14 +765,24 @@ class DeckWindow : Window
         });
         content.Children.Add(titleRow);
         content.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(pal.Ink) { Opacity = 0.12 }, Margin = new Thickness(0, 10, 0, 9) });
-        content.Children.Add(new TextBlock
+        content.Children.Add(new FlowDocumentScrollViewer
         {
-            Text = text.Length == 0 ? Loc.T("Empty note", "空便签") : text,
-            TextWrapping = TextWrapping.Wrap,
-            MaxHeight = 58,
+            Document = note.UsesMarkdown
+                ? MarkdownPreview.CreateDocument(note.Body, pal, 12.5)
+                : MarkdownPreview.CreatePlainTextDocument(note.Body, pal, 12.5),
+            Height = 82,
+            IsToolBarVisible = false,
+            IsSelectionEnabled = false,
+            IsHitTestVisible = false,
+            Focusable = false,
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(0),
+            Background = Brushes.Transparent,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             FontSize = 12.5,
-            LineHeight = 19,
             Foreground = new SolidColorBrush(pal.Ink) { Opacity = 0.78 },
+            Margin = new Thickness(0, 0, 0, 1),
         });
         if (progress.Total > 0)
         {

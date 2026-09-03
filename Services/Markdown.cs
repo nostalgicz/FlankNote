@@ -12,16 +12,20 @@ namespace FlankNote;
 /// collapsed elsewhere while the stored source remains unchanged.</summary>
 static class Markdown
 {
-    static readonly Regex Heading = new(@"^(#{1,6})[ \t]+(.+)$", RegexOptions.Compiled);
-    static readonly Regex OrderedList = new(@"^\s*(\d+[.)])\s+", RegexOptions.Compiled);
-    static readonly Regex Bullet = new(@"^\s*([-*+])[ \t]+", RegexOptions.Compiled);
+    static readonly Regex Heading = new(@"^(?<marks>#{1,6})[ \t]+(?<text>.*?)(?:[ \t]+(?<closing>#+)[ \t]*)?$", RegexOptions.Compiled);
+    static readonly Regex Setext = new(@"^\s*(?<marks>=+|-+)\s*$", RegexOptions.Compiled);
+    static readonly Regex ThematicBreak = new(@"^\s*(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$", RegexOptions.Compiled);
+    static readonly Regex OrderedList = new(@"^(?<indent>[ \t]*)(?<marker>\d+[.)])[ \t]+", RegexOptions.Compiled);
+    static readonly Regex Bullet = new(@"^(?<indent>[ \t]*)(?<marker>[-*+])[ \t]+", RegexOptions.Compiled);
     static readonly Regex Bold = new(@"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", RegexOptions.Compiled);
     static readonly Regex Italic = new(@"(?<![\*_])([\*_])(?=[^\*_\s])(.+?)(?<=[^\*_\s])\1(?![\*_])", RegexOptions.Compiled);
     static readonly Regex InlineCode = new(@"`([^`\r\n]+)`", RegexOptions.Compiled);
     static readonly Regex Struck = new(@"~~(?=\S)(.+?)(?<=\S)~~", RegexOptions.Compiled);
-    static readonly Regex Quote = new(@"^>[ \t]?(.*)$", RegexOptions.Compiled);
+    static readonly Regex Quote = new(@"^(?<marks>>+)[ \t]?(?<text>.*)$", RegexOptions.Compiled);
     static readonly Regex Link = new(@"(?<!!)\[([^\]\r\n]+)\]\(([^)\s]+)\)", RegexOptions.Compiled);
+    static readonly Regex Autolink = new(@"<(?<url>(?:https?://|mailto:)[^>\s]+)>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     static readonly Regex FenceOpen = new(@"^\s*(?<ticks>`{3,})(?<info>[^`]*)$", RegexOptions.Compiled);
+    sealed record RenderedBullet(int Index, char SourceMarker);
 
     static TextRange Marker(Paragraph p, int start, int length)
         => new(PositionAtTextOffset(p, start), PositionAtTextOffset(p, start + length));
@@ -58,12 +62,40 @@ static class Markdown
         return null;
     }
 
-    public static bool HandleTaskReturn(RichTextBox editor)
+    public static string SourceText(Paragraph paragraph)
+    {
+        string text = new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text;
+        if (paragraph.Tag is not RenderedBullet marker
+            || marker.Index < 0 || marker.Index >= text.Length
+            || text[marker.Index] != '\u2022') return text;
+        return text[..marker.Index] + marker.SourceMarker + text[(marker.Index + 1)..];
+    }
+
+    public static void RestoreSourceMarkers(FlowDocument document)
+    {
+        foreach (var paragraph in document.Blocks.OfType<Paragraph>().ToArray())
+            RestoreSourceMarker(paragraph);
+        ClearBlockStyles(document);
+    }
+
+    static void RestoreSourceMarker(Paragraph paragraph)
+    {
+        if (paragraph.Tag is not RenderedBullet marker) return;
+        string text = new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text;
+        if (marker.Index >= 0 && marker.Index < text.Length && text[marker.Index] == '\u2022')
+            Marker(paragraph, marker.Index, 1).Text = marker.SourceMarker.ToString();
+        paragraph.Tag = null;
+    }
+
+    public static bool HandleTaskReturn(RichTextBox editor, bool markdownEnabled)
     {
         if (Keyboard.Modifiers != ModifierKeys.None || !editor.Selection.IsEmpty) return false;
         var paragraph = ParagraphAt(editor.CaretPosition);
         if (paragraph == null) return false;
         string text = new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text;
+        if (!markdownEnabled
+            && !text.StartsWith(Tasks.Open + " ")
+            && !text.StartsWith(Tasks.Done + " ")) return false;
         if (!Tasks.IsTask(text)) return false;
 
         editor.BeginChange();
@@ -82,9 +114,10 @@ static class Markdown
                 string before = text[..offset];
                 string after = text[offset..];
                 new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text = before;
-                var next = new Paragraph(new Run(Tasks.Open + " " + after)) { Margin = new Thickness(0) };
+                var next = new Paragraph(new Run(Tasks.Continuation(text, after))) { Margin = new Thickness(0) };
                 editor.Document.Blocks.InsertAfter(paragraph, next);
-                editor.CaretPosition = PositionAtTextOffset(next, 2);
+                editor.CaretPosition = PositionAtTextOffset(next,
+                    Tasks.ContentOffset(new TextRange(next.ContentStart, next.ContentEnd).Text));
             }
         }
         finally
@@ -95,39 +128,77 @@ static class Markdown
     }
 
     /// <summary>Styles a complete document so fenced code blocks can span
-    /// paragraphs. The source text and Markdown markers are never replaced.</summary>
+    /// paragraphs. Inactive bullet markers use a temporary display glyph;
+    /// <see cref="SourceText"/> always returns their original Markdown.</summary>
     public static void StyleDocument(FlowDocument document, NoteColor pal, double baseSize,
                                      Paragraph? activeParagraph)
     {
+        var wholeDocument = new TextRange(document.ContentStart, document.ContentEnd);
+        wholeDocument.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Normal);
+        wholeDocument.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Normal);
+        wholeDocument.ApplyPropertyValue(TextElement.FontFamilyProperty,
+            new FontFamily("Segoe UI, Microsoft YaHei UI"));
+        wholeDocument.ApplyPropertyValue(TextElement.ForegroundProperty, pal.InkB);
+        wholeDocument.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize);
+        wholeDocument.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
+        wholeDocument.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
+
         // Applying TextRange properties can split or merge WPF Runs. That bumps
         // the document text-tree version and invalidates a live Blocks
         // enumerator even though the Paragraph objects themselves still exist.
         // Always style a stable snapshot.
         var paragraphs = document.Blocks.OfType<Paragraph>().ToArray();
-        ClearBlockStyles(paragraphs);
-        int fenceLength = 0;
         foreach (var paragraph in paragraphs)
+            RestoreSourceMarker(paragraph);
+        ClearBlockStyles(paragraphs);
+        var texts = paragraphs
+            .Select(p => new TextRange(p.ContentStart, p.ContentEnd).Text)
+            .ToArray();
+        var setextHeadings = new HashSet<Paragraph>();
+        var setextMarkers = new HashSet<Paragraph>();
+        for (int i = 1; i < paragraphs.Length; i++)
         {
-            var text = new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text;
+            if (CanBeSetextHeadingText(texts[i - 1]) && Setext.IsMatch(texts[i]))
+            {
+                setextHeadings.Add(paragraphs[i - 1]);
+                setextMarkers.Add(paragraphs[i]);
+            }
+        }
+
+        int fenceLength = 0;
+        for (int i = 0; i < paragraphs.Length; i++)
+        {
+            var paragraph = paragraphs[i];
+            var text = texts[i];
             if (fenceLength == 0)
             {
                 var opening = FenceOpen.Match(text);
                 if (opening.Success)
                 {
                     fenceLength = opening.Groups["ticks"].Length;
-                    StyleFenceMarker(paragraph, pal, ReferenceEquals(paragraph, activeParagraph));
+                    if (!ReferenceEquals(paragraph, activeParagraph))
+                        StyleFenceMarker(paragraph, pal, reveal: false);
                 }
-                else
+                else if (setextMarkers.Contains(paragraph))
                 {
-                    StyleParagraph(paragraph, pal, baseSize, ReferenceEquals(paragraph, activeParagraph));
+                    if (!ReferenceEquals(paragraph, activeParagraph))
+                        StyleSetextMarker(paragraph, pal, reveal: false);
+                }
+                else if (!ReferenceEquals(paragraph, activeParagraph))
+                {
+                    StyleParagraph(paragraph, pal, baseSize, revealMarkers: false,
+                        setextHeadings.Contains(paragraph)
+                            ? (Setext.Match(texts[i + 1]).Groups["marks"].Value[0] == '=' ? 1 : 2)
+                            : null);
                 }
             }
             else if (Regex.IsMatch(text, $@"^\s*`{{{fenceLength},}}\s*$"))
             {
-                StyleFenceMarker(paragraph, pal, ReferenceEquals(paragraph, activeParagraph));
+                if (!ReferenceEquals(paragraph, activeParagraph))
+                    StyleFenceMarker(paragraph, pal, reveal: false);
                 fenceLength = 0;
             }
-            else
+            else if (!ReferenceEquals(paragraph, activeParagraph))
             {
                 StyleCodeBlock(paragraph, pal);
             }
@@ -136,6 +207,56 @@ static class Markdown
 
     public static void ClearBlockStyles(FlowDocument document)
         => ClearBlockStyles(document.Blocks.OfType<Paragraph>().ToArray());
+
+    public static bool TryGetBullet(string text, out int markerIndex)
+    {
+        if (ThematicBreak.IsMatch(text))
+        {
+            markerIndex = -1;
+            return false;
+        }
+        var match = Bullet.Match(text);
+        markerIndex = match.Success ? match.Groups["marker"].Index : -1;
+        return match.Success;
+    }
+
+    public static bool TryToggleTaskAtPoint(RichTextBox editor, MouseButtonEventArgs e, bool markdownEnabled)
+    {
+        var position = editor.GetPositionFromPoint(e.GetPosition(editor), true);
+        var paragraph = ParagraphAt(position);
+        if (position == null || paragraph == null) return false;
+        var text = SourceText(paragraph);
+        if (!markdownEnabled
+            && !text.StartsWith(Tasks.Open + " ")
+            && !text.StartsWith(Tasks.Done + " ")) return false;
+        if (!Tasks.IsTask(text)) return false;
+        int offset = new TextRange(paragraph.ContentStart, position).Text.Length;
+        if (!Tasks.IsMarkerOffset(text, offset)) return false;
+        paragraph.Tag = null;
+        new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text = Tasks.Toggle(text);
+        e.Handled = true;
+        return true;
+    }
+
+    public static bool CanBeSetextHeadingText(string text)
+        => !string.IsNullOrWhiteSpace(text)
+            && !Heading.IsMatch(text)
+            && !Bullet.IsMatch(text)
+            && !OrderedList.IsMatch(text)
+            && !Quote.IsMatch(text)
+            && !FenceOpen.IsMatch(text)
+            && !ThematicBreak.IsMatch(text)
+            && !Tasks.IsTask(text);
+
+    public static bool TryGetFenceOpening(string text, out int length)
+    {
+        var match = FenceOpen.Match(text);
+        length = match.Success ? match.Groups["ticks"].Length : 0;
+        return match.Success;
+    }
+
+    public static bool IsFenceClosing(string text, int length)
+        => length >= 3 && Regex.IsMatch(text, $@"^\s*`{{{length},}}\s*$");
 
     static void ClearBlockStyles(IEnumerable<Paragraph> paragraphs)
     {
@@ -169,60 +290,102 @@ static class Markdown
             Hide(range);
     }
 
-    public static void StyleParagraph(Paragraph p, NoteColor pal, double baseSize, bool revealMarkers)
+    static void StyleSetextMarker(Paragraph paragraph, NoteColor pal, bool reveal)
+    {
+        paragraph.Padding = new Thickness(0, 3, 0, 3);
+        paragraph.BorderBrush = new SolidColorBrush(pal.Dash) { Opacity = 0.45 };
+        paragraph.BorderThickness = new Thickness(0, 0, 0, 1);
+        var range = new TextRange(paragraph.ContentStart, paragraph.ContentEnd);
+        if (reveal) range.ApplyPropertyValue(TextElement.ForegroundProperty,
+            new SolidColorBrush(pal.Ink) { Opacity = 0.30 });
+        else Hide(range);
+    }
+
+    public static void StyleParagraph(Paragraph p, NoteColor pal, double baseSize, bool revealMarkers,
+                                      int? setextLevel = null)
     {
         p.Margin = new Thickness(0);   // keep the note dense — no paragraph gaps
         var text = new TextRange(p.ContentStart, p.ContentEnd).Text;
         var body = new TextRange(p.ContentStart, p.ContentEnd);
 
-        // tasks: strike a done line and dim it
+        if (ThematicBreak.IsMatch(text))
+        {
+            StyleThematicBreak(p, pal, revealMarkers);
+            return;
+        }
+
+        // GFM/custom tasks: strike completed lines but continue styling their
+        // list marker and inline formatting.
         if (Tasks.IsDone(text))
         {
             body.ApplyPropertyValue(Inline.TextDecorationsProperty, TextDecorations.Strikethrough);
             body.ApplyPropertyValue(TextElement.ForegroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.55 });
-            return;
         }
         // ATX headings: levels 1-6
         var heading = Heading.Match(text);
         if (heading.Success)
         {
-            int level = heading.Groups[1].Length;
+            int level = heading.Groups["marks"].Length;
             body.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.SemiBold);
             double[] additions = [5, 4, 3, 2, 1, 0.5];
             body.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize + additions[level - 1]);
             StyleMarker(Marker(p, 0, level), pal, revealMarkers);
+            if (heading.Groups["closing"].Success)
+                StyleMarker(Marker(p, heading.Groups["closing"].Index,
+                    heading.Groups["closing"].Length), pal, revealMarkers);
+        }
+        else if (setextLevel is { } level)
+        {
+            body.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.SemiBold);
+            double[] additions = [5, 3];
+            body.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize + additions[level - 1]);
         }
 
         var quote = Quote.Match(text);
         if (quote.Success)
         {
+            int depth = quote.Groups["marks"].Length;
             body.ApplyPropertyValue(TextElement.ForegroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.62 });
             body.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Italic);
-            p.Margin = new Thickness(8, 1, 0, 1);
+            p.Margin = new Thickness(8 + (depth - 1) * 8, 1, 0, 1);
             p.Padding = new Thickness(10, 1, 0, 1);
             p.BorderBrush = new SolidColorBrush(pal.Dash) { Opacity = 0.55 };
             p.BorderThickness = new Thickness(2, 0, 0, 0);
-            StyleMarker(Marker(p, 0, 1), pal, revealMarkers);
+            StyleMarker(Marker(p, 0, depth), pal, revealMarkers);
         }
 
         var bullet = Bullet.Match(text);
         if (bullet.Success)
         {
-            var marker = bullet.Groups[1];
-            p.Margin = new Thickness(15, 0, 0, 0);
+            var marker = bullet.Groups["marker"];
+            int indent = IndentColumns(bullet.Groups["indent"].Value);
+            p.Margin = new Thickness(15 + indent * 3, 0, 0, 0);
             p.TextIndent = -10;
-            var markerRange = Marker(p, marker.Index, marker.Length);
-            markerRange.ApplyPropertyValue(TextElement.ForegroundProperty, pal.DashB);
-            markerRange.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Bold);
+            if (revealMarkers)
+            {
+                StyleMarker(Marker(p, marker.Index, marker.Length), pal, reveal: true);
+            }
+            else
+            {
+                Marker(p, marker.Index, marker.Length).Text = "\u2022";
+                p.Tag = new RenderedBullet(marker.Index, marker.Value[0]);
+                var renderedMarker = Marker(p, marker.Index, 1);
+                renderedMarker.ApplyPropertyValue(TextElement.ForegroundProperty, pal.DashB);
+                renderedMarker.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.SemiBold);
+            }
         }
 
         // ordered lists: both "1. item" and "1) item"
         var ordered = OrderedList.Match(text);
         if (ordered.Success)
         {
-            var marker = ordered.Groups[1];
-            p.Margin = new Thickness(20, 0, 0, 0);
-            p.TextIndent = -15;
+            var marker = ordered.Groups["marker"];
+            int indent = IndentColumns(ordered.Groups["indent"].Value);
+            // Keep the marker in the gutter while reserving enough room for
+            // multi-digit numbers; a fixed -15px indent overlaps at 100+.
+            double markerGutter = 15 + Math.Max(0, marker.Length - 2) * 8;
+            p.Margin = new Thickness(5 + markerGutter + indent * 3, 0, 0, 0);
+            p.TextIndent = -markerGutter;
             var markerRange = Marker(p, marker.Index, marker.Length);
             markerRange.ApplyPropertyValue(TextElement.ForegroundProperty, pal.DashB);
             markerRange.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.SemiBold);
@@ -248,6 +411,32 @@ static class Markdown
         // Run links last so Markdown-like characters inside a URL cannot make
         // its hidden destination visible again.
         StyleLinks(p, text, pal, revealMarkers);
+
+        if (Tasks.TryGetMarkdownMarker(text, out int boxStart, out _, out _))
+        {
+            var boxRange = Marker(p, boxStart, 3);
+            boxRange.ApplyPropertyValue(TextElement.ForegroundProperty, pal.DashB);
+            boxRange.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.SemiBold);
+        }
+
+        if (Tasks.IsDone(text))
+            body.ApplyPropertyValue(Inline.TextDecorationsProperty, TextDecorations.Strikethrough);
+    }
+
+    static int IndentColumns(string value)
+        => value.Aggregate(0, (count, c) => count + (c == '\t' ? 4 : 1));
+
+    static void StyleThematicBreak(Paragraph paragraph, NoteColor pal, bool reveal)
+    {
+        paragraph.Padding = new Thickness(0, 4, 0, 4);
+        paragraph.BorderBrush = new SolidColorBrush(pal.Dash) { Opacity = 0.42 };
+        paragraph.BorderThickness = new Thickness(0, 0, 0, 1);
+        var range = new TextRange(paragraph.ContentStart, paragraph.ContentEnd);
+        if (reveal)
+            range.ApplyPropertyValue(TextElement.ForegroundProperty,
+                new SolidColorBrush(pal.Ink) { Opacity = 0.30 });
+        else
+            Hide(range);
     }
 
     static void StyleLinks(Paragraph paragraph, string text, NoteColor pal, bool revealMarkers)
@@ -263,6 +452,17 @@ static class Markdown
             labelRange.ApplyPropertyValue(TextElement.ForegroundProperty, pal.DashB);
             labelRange.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Medium);
             labelRange.ApplyPropertyValue(Inline.TextDecorationsProperty, TextDecorations.Underline);
+        }
+
+        foreach (Match match in Autolink.Matches(text))
+        {
+            var url = match.Groups["url"];
+            StyleMarker(Marker(paragraph, match.Index, 1), pal, revealMarkers);
+            StyleMarker(Marker(paragraph, match.Index + match.Length - 1, 1), pal, revealMarkers);
+            var urlRange = Marker(paragraph, url.Index, url.Length);
+            urlRange.ApplyPropertyValue(TextElement.ForegroundProperty, pal.DashB);
+            urlRange.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Medium);
+            urlRange.ApplyPropertyValue(Inline.TextDecorationsProperty, TextDecorations.Underline);
         }
     }
 
@@ -302,9 +502,9 @@ static class Markdown
 
     /// <summary>Windows equivalent of the upstream Command-click behavior.
     /// Plain clicks keep editing; Ctrl-click opens only safe web/mail schemes.</summary>
-    public static bool TryOpenLink(RichTextBox editor, MouseButtonEventArgs e)
+    public static bool TryOpenLink(RichTextBox editor, MouseButtonEventArgs e, bool markdownEnabled)
     {
-        if (!Settings.Markdown || (Keyboard.Modifiers & ModifierKeys.Control) == 0) return false;
+        if (!markdownEnabled || (Keyboard.Modifiers & ModifierKeys.Control) == 0) return false;
         var position = editor.GetPositionFromPoint(e.GetPosition(editor), true);
         var paragraph = ParagraphAt(position);
         if (position == null || paragraph == null) return false;
@@ -315,25 +515,36 @@ static class Markdown
         {
             var label = match.Groups[1];
             if (offset < label.Index || offset > label.Index + label.Length) continue;
-            if (!Uri.TryCreate(match.Groups[2].Value, UriKind.Absolute, out var uri)) return false;
-            if (uri.Scheme is not ("http" or "https" or "mailto")) return false;
-
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri)
-                {
-                    UseShellExecute = true,
-                });
-            }
-            catch (Exception ex)
-            {
-                App.ReportError($"Opening link failed: {ex}");
-                return false;
-            }
-            e.Handled = true;
-            return true;
+            return OpenLink(match.Groups[2].Value, e);
+        }
+        foreach (Match match in Autolink.Matches(text))
+        {
+            var url = match.Groups["url"];
+            if (offset < url.Index || offset > url.Index + url.Length) continue;
+            return OpenLink(url.Value, e);
         }
         return false;
+    }
+
+    static bool OpenLink(string value, MouseButtonEventArgs e)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https" or "mailto")) return false;
+
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri)
+            {
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            App.ReportError($"Opening link failed: {ex}");
+            return false;
+        }
+        e.Handled = true;
+        return true;
     }
 
 }

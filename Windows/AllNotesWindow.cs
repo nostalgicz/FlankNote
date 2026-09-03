@@ -27,7 +27,7 @@ class AllNotesWindow : Window
     readonly TextBlock _viewToggle;
     readonly TextBox _titleBox = new();
     readonly RichTextBox _body;
-    readonly Border _colorBtn, _archiveBtn, _deleteBtn;
+    readonly Border _modeBtn, _colorBtn, _archiveBtn, _deleteBtn;
     readonly Ellipse _colorSwatch = new() { Width = 11, Height = 11, StrokeThickness = 1 };
     readonly Popup _colourPopup = new() { AllowsTransparency = true, StaysOpen = false };
     readonly Grid _detailEditor = new();
@@ -40,6 +40,7 @@ class AllNotesWindow : Window
     bool _loading;
     bool _styling;
     bool _titleEdited;
+    Paragraph? _editingMarkdownParagraph;
 
     public AllNotesWindow(bool archivedOnly = false)
     {
@@ -153,27 +154,36 @@ class AllNotesWindow : Window
         _body.Document = new FlowDocument { PagePadding = new Thickness(0) };
         _body.TextChanged += (_, _) =>
         {
-            if (_loading || _current == null) return;
-            StyleBody();
+            if (_loading || _styling || _current == null) return;
+            StyleBodyIfLineChanged();
             _autosave.Stop(); _autosave.Start();
         };
+        _body.SelectionChanged += (_, _) =>
+        {
+            if (!_loading && !_styling && _current != null) StyleBodyIfLineChanged();
+        };
+        _body.GotKeyboardFocus += (_, _) => StyleBody();
+        _body.LostKeyboardFocus += (_, _) =>
+            Dispatcher.BeginInvoke(new Action(StyleBody));
         _titleBox.TextChanged += (_, _) =>
         {
             if (_loading || _current == null) return;
             _titleEdited = true;
             _autosave.Stop(); _autosave.Start();
         };
-        _body.SelectionChanged += (_, _) =>
+        _body.PreviewMouseLeftButtonDown += (_, e) =>
         {
-            if (Settings.Markdown && !_styling && !_loading && _current != null) StyleBody();
+            if (Markdown.TryOpenLink(_body, e, _current?.UsesMarkdown == true)) return;
+            Markdown.TryToggleTaskAtPoint(_body, e, _current?.UsesMarkdown == true);
         };
-        _body.PreviewMouseLeftButtonDown += (_, e) => Markdown.TryOpenLink(_body, e);
         _body.PreviewKeyDown += (_, e) =>
         {
-            if (e.Key == Key.Return && Markdown.HandleTaskReturn(_body)) e.Handled = true;
+            if (e.Key == Key.Return
+                && Markdown.HandleTaskReturn(_body, _current?.UsesMarkdown == true)) e.Handled = true;
         };
         _autosave.Tick += (_, _) => { _autosave.Stop(); Save(); };
 
+        _modeBtn = ActionButton("", (_, _) => ToggleTextMode());
         _colorBtn = ActionButton(Loc.T("Colour", "颜色"), (_, _) => ShowColourMenu());
         var colourText = ActionLabel(_colorBtn);
         _colorBtn.Child = null;
@@ -201,6 +211,7 @@ class AllNotesWindow : Window
         }, danger: true);
 
         var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 14, 0, 0) };
+        btns.Children.Add(_modeBtn);
         btns.Children.Add(_colorBtn);
         btns.Children.Add(_archiveBtn);
         btns.Children.Add(_deleteBtn);
@@ -453,7 +464,7 @@ class AllNotesWindow : Window
                 Width = 3, CornerRadius = new CornerRadius(2),
                 Background = pal.DashB,
             });
-            var progress = Tasks.Progress(n.Body);
+            var progress = Tasks.Progress(n.Body, n.UsesMarkdown);
             var title = new TextBlock
             {
                 Text = n.DisplayTitle,
@@ -522,8 +533,9 @@ class AllNotesWindow : Window
             _body.Document.Blocks.Clear();
             foreach (var line in n.Body.Split('\n'))
                 _body.Document.Blocks.Add(new Paragraph(new Run(line.TrimEnd('\r'))) { Margin = new Thickness(0) });
-            _loading = false;
             StyleBody();
+            _loading = false;
+            UpdateModeButton();
             ActionLabel(_archiveBtn).Text = n.Archived
                 ? Loc.T("Restore", "恢复") : Loc.T("Archive", "归档");
             UpdateColourSwatch(n.Palette);
@@ -538,6 +550,8 @@ class AllNotesWindow : Window
         _current = null;
         _titleBox.Text = "";
         _body.Document.Blocks.Clear();
+        _editingMarkdownParagraph = null;
+        ActionLabel(_modeBtn).Text = "";
         ActionLabel(_archiveBtn).Text = Loc.T("Archive", "归档");
         _colorSwatch.Fill = Brushes.Transparent;
         _colorSwatch.Stroke = Hairline;
@@ -560,18 +574,59 @@ class AllNotesWindow : Window
             all.ApplyPropertyValue(TextElement.FontSizeProperty, 14.0);
             all.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
             all.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
-            if (Settings.Markdown)
+            var editingParagraph = CurrentEditingParagraph();
+            _editingMarkdownParagraph = editingParagraph;
+            if (_current?.UsesMarkdown == true)
                 Markdown.StyleDocument(doc, _current?.Palette ?? NoteColor.At(0), 14.0,
-                    Markdown.ParagraphAt(_body.CaretPosition));
+                    editingParagraph);
             else
-                Markdown.ClearBlockStyles(doc);
+                Markdown.RestoreSourceMarkers(doc);
         }
         catch (Exception ex)
         {
             Log($"StyleBody EX {ex}");
         }
-        finally { _styling = false; }
+        finally
+        {
+            _styling = false;
+        }
     }
+
+    Paragraph? CurrentEditingParagraph()
+        => _body.IsKeyboardFocusWithin
+            ? Markdown.ParagraphAt(_body.CaretPosition)
+            : null;
+
+    void StyleBodyIfLineChanged()
+    {
+        if (!ReferenceEquals(CurrentEditingParagraph(), _editingMarkdownParagraph))
+            StyleBody();
+    }
+
+    void ToggleTextMode()
+    {
+        if (_current == null) return;
+        Save();
+        _current.MarkdownEnabled = !_current.UsesMarkdown;
+        _body.Focus();
+        StyleBody();
+        NotesStore.I.Update(_current);
+        _loading = true;
+        _titleBox.Text = _current.DisplayTitle;
+        _loading = false;
+        UpdateModeButton();
+    }
+
+    void UpdateModeButton()
+    {
+        if (_current == null) return;
+        bool markdown = _current.UsesMarkdown;
+        ActionLabel(_modeBtn).Text = markdown ? "MD" : "TXT";
+        _modeBtn.ToolTip = markdown
+            ? Loc.T("Markdown mode. Click for plain text.", "Markdown 模式，点击切换到纯文本。")
+            : Loc.T("Plain text mode. Click for Markdown.", "纯文本模式，点击切换到 Markdown。");
+    }
+
 
     void Save()
     {
@@ -593,7 +648,7 @@ class AllNotesWindow : Window
         var sb = new System.Text.StringBuilder();
         foreach (Block b in _body.Document.Blocks)
             if (b is Paragraph p)
-                sb.Append(new TextRange(p.ContentStart, p.ContentEnd).Text).Append('\n');
+                sb.Append(Markdown.SourceText(p)).Append('\n');
         _current.Body = sb.ToString().TrimEnd('\n');
         NotesStore.I.Update(_current);
         _loading = true;

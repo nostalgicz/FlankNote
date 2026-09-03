@@ -29,17 +29,19 @@ class TrayIcon : IDisposable
 
     Icon MakeIcon()
     {
-        // Use the same embedded asset as the executable and every WPF window.
-        // Clone it before closing the resource stream because Icon retains a
-        // dependency on its source stream.
+        // Select the embedded logo frame that matches the current tray DPI.
+        // Loading an ICO without an explicit size defaults to 32 px, which
+        // Windows then downsamples and makes noticeably softer at 16-24 px.
         try
         {
             var resource = System.Windows.Application.GetResourceStream(
                 new Uri("pack://application:,,,/icon.ico"));
             if (resource != null)
             {
+                uint dpi = Native.GetDpiForSystem();
+                int size = Math.Clamp((int)Math.Round(16 * Math.Max(96, dpi) / 96.0), 16, 48);
                 using (resource.Stream)
-                using (var source = new Icon(resource.Stream))
+                using (var source = new Icon(resource.Stream, new Size(size, size)))
                     return (Icon)source.Clone();
             }
         }

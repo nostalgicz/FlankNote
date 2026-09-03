@@ -2,6 +2,7 @@ using System.Reflection;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Diagnostics;
@@ -12,7 +13,7 @@ namespace FlankNote;
 class UpdateWindow : Window
 {
     readonly TextBlock _statusText = new();
-    readonly TextBlock _releaseNotes = new();
+    readonly RichTextBox _releaseNotes = new();
     readonly Border _action = new();
     GitHubRelease? _release;
     bool _isDownloading;
@@ -67,19 +68,30 @@ class UpdateWindow : Window
         Grid.SetRow(status, 1);
         root.Children.Add(status);
 
-        var notes = new StackPanel { Margin = new Thickness(2, 20, 2, 0) };
-        notes.Children.Add(new TextBlock
+        var notes = new Grid { Margin = new Thickness(2, 20, 2, 0) };
+        notes.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        notes.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var notesHeading = new TextBlock
         {
             Text = Loc.T("RELEASE NOTES", "更新内容"),
             FontSize = 10.5,
             FontWeight = FontWeights.SemiBold,
             Foreground = UiTheme.Muted,
             Margin = new Thickness(0, 0, 0, 8),
-        });
-        _releaseNotes.Text = Loc.T("Checking GitHub Releases…", "正在检查 GitHub Releases…");
+        };
+        notes.Children.Add(notesHeading);
+        _releaseNotes.IsReadOnly = true;
+        _releaseNotes.IsDocumentEnabled = true;
+        _releaseNotes.BorderThickness = new Thickness(0);
+        _releaseNotes.Background = Brushes.Transparent;
+        _releaseNotes.Padding = new Thickness(0);
+        _releaseNotes.Margin = new Thickness(0);
+        _releaseNotes.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+        _releaseNotes.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
         _releaseNotes.FontSize = 13;
         _releaseNotes.Foreground = UiTheme.Muted;
-        _releaseNotes.TextWrapping = TextWrapping.Wrap;
+        SetReleaseNotes(Loc.T("Checking GitHub Releases…", "正在检查 GitHub Releases…"));
+        Grid.SetRow(_releaseNotes, 1);
         notes.Children.Add(_releaseNotes);
         Grid.SetRow(notes, 2);
         root.Children.Add(notes);
@@ -157,14 +169,14 @@ class UpdateWindow : Window
             if (_release == null)
             {
                 _statusText.Text = Loc.T("No published release found", "没有找到已发布版本");
-                _releaseNotes.Text = Loc.T("No published release was found.", "没有找到已发布的版本。");
+                SetReleaseNotes(Loc.T("No published release was found.", "没有找到已发布的版本。"));
                 SetAction(Loc.T("Close", "关闭"), enabled: true);
                 return;
             }
             bool newer = GitHubUpdateService.IsNewer(_release.TagName);
-            _releaseNotes.Text = string.IsNullOrWhiteSpace(_release.Body)
+            SetReleaseNotes(string.IsNullOrWhiteSpace(_release.Body)
                 ? Loc.T($"Latest release: {_release.TagName}", $"最新版本：{_release.TagName}")
-                : _release.Body.Trim();
+                : _release.Body.Trim());
             if (newer)
             {
                 SetAction(Loc.T("Download and install", "下载并安装"), enabled: true);
@@ -180,7 +192,7 @@ class UpdateWindow : Window
         {
             App.ReportError($"Update check failed: {ex}");
             _statusText.Text = Loc.T("Update check failed", "更新检查失败");
-            _releaseNotes.Text = Loc.T("Could not check GitHub Releases. Check your network connection.", "无法检查 GitHub Releases，请检查网络连接。");
+            SetReleaseNotes(Loc.T("Could not check GitHub Releases. Check your network connection.", "无法检查 GitHub Releases，请检查网络连接。"));
             SetAction(Loc.T("Close", "关闭"), enabled: true);
         }
     }
@@ -190,6 +202,11 @@ class UpdateWindow : Window
         if (_action.Child is TextBlock label) label.Text = text;
         _action.IsHitTestVisible = enabled;
         _action.Opacity = enabled ? 1 : 0.55;
+    }
+
+    void SetReleaseNotes(string text)
+    {
+        _releaseNotes.Document = MarkdownPreview.CreateDocument(text, NoteColor.At(0), 13);
     }
 
     async void OnAction(object sender, MouseButtonEventArgs e)
@@ -226,16 +243,16 @@ class UpdateWindow : Window
                 if (ex is IOException or UnauthorizedAccessException)
                 {
                     _statusText.Text = Loc.T("Could not save the installer", "无法保存安装程序");
-                    _releaseNotes.Text = Loc.T(
+                    SetReleaseNotes(Loc.T(
                         "The download completed, but Windows could not save the installer. Close any installer already open and try again.",
-                        "下载已完成，但 Windows 无法保存安装程序。请关闭已打开的安装程序后重试。");
+                        "下载已完成，但 Windows 无法保存安装程序。请关闭已打开的安装程序后重试。"));
                 }
                 else
                 {
                     _statusText.Text = Loc.T("Update download failed", "更新下载失败");
-                    _releaseNotes.Text = Loc.T(
+                    SetReleaseNotes(Loc.T(
                         "The installer could not be downloaded. Check your network connection and try again.",
-                        "无法下载安装程序，请检查网络连接后重试。");
+                        "无法下载安装程序，请检查网络连接后重试。"));
                 }
                 SetAction(Loc.T("Try again", "重试"), enabled: true);
             }

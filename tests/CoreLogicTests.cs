@@ -1,15 +1,68 @@
 using Xunit;
+using System.Linq;
+using System.Windows.Documents;
 
 namespace FlankNote.Tests;
 
 public sealed class CoreLogicTests
 {
     [Fact]
+    public void MarkdownPreviewRendersCommonMarkdownBlocks()
+    {
+        var document = MarkdownPreview.CreateDocument(
+            "# Release notes\n\n- [x] Done\n- [ ] Next\n\n> Important\n\n```text\ncode\n```\n\n| Name | Value |\n| --- | --- |\n| One | Two |",
+            NoteColor.At(0));
+
+        Assert.Contains(document.Blocks.OfType<Paragraph>(), block => block.FontSize > document.FontSize);
+        Assert.Single(document.Blocks.OfType<List>());
+        Assert.Single(document.Blocks.OfType<Section>());
+        Assert.Single(document.Blocks.OfType<Table>());
+        string visibleText = new TextRange(document.ContentStart, document.ContentEnd).Text;
+        Assert.Contains("☑", visibleText);
+        Assert.Contains("code", visibleText);
+    }
+
+    [Fact]
+    public void MarkdownPreviewRendersDashListsAsNativeListMarkers()
+    {
+        var document = MarkdownPreview.CreateDocument("- first\n- second", NoteColor.At(0));
+
+        var list = Assert.Single(document.Blocks.OfType<List>());
+        Assert.Equal(System.Windows.TextMarkerStyle.Disc, list.MarkerStyle);
+        string visibleText = new TextRange(document.ContentStart, document.ContentEnd).Text;
+        Assert.Contains("first", visibleText);
+        Assert.DoesNotContain("- first", visibleText);
+    }
+
+    [Fact]
+    public void PlainTextPreviewKeepsMarkdownCharactersLiteral()
+    {
+        var document = MarkdownPreview.CreatePlainTextDocument(
+            "# 中文标题\n- 普通横线\n---", NoteColor.At(0));
+
+        string visibleText = new TextRange(document.ContentStart, document.ContentEnd).Text;
+        Assert.Contains("# 中文标题", visibleText);
+        Assert.Contains("- 普通横线", visibleText);
+        Assert.Contains("---", visibleText);
+        Assert.Empty(document.Blocks.OfType<List>());
+    }
+
+    [Fact]
     public void TaskProgressCountsOpenAndDoneLines()
     {
         var result = Tasks.Progress("☐ one\n☑ two\nplain");
         Assert.Equal(1, result.Done);
         Assert.Equal(2, result.Total);
+    }
+
+    [Fact]
+    public void PlainTextModeIgnoresMarkdownTaskSyntax()
+    {
+        var result = Tasks.Progress("- [x] Markdown\n☐ Native", markdownEnabled: false);
+
+        Assert.Equal(0, result.Done);
+        Assert.Equal(1, result.Total);
+        Assert.Equal("- [ ] literal", Tasks.Strip("- [ ] literal", markdownEnabled: false));
     }
 
     [Fact]
@@ -21,11 +74,226 @@ public sealed class CoreLogicTests
     }
 
     [Fact]
+    public void MarkdownTaskCheckboxesAreRecognizedAndPreserved()
+    {
+        Assert.True(Tasks.IsOpen("- [ ] item"));
+        Assert.True(Tasks.IsDone("- [x] item"));
+        Assert.True(Tasks.IsOpen("1. [ ] item"));
+        Assert.True(Tasks.IsDone("2) [X] item"));
+        Assert.Equal("item", Tasks.Strip("- [ ] item"));
+        Assert.Equal("item", Tasks.Strip("1. [ ] item"));
+        Assert.Equal("- [x] item", Tasks.Toggle("- [ ] item"));
+        Assert.Equal("- [ ] item", Tasks.Toggle("- [x] item"));
+        Assert.Equal("2) [ ] item", Tasks.Toggle("2) [X] item"));
+        Assert.Equal("- [ ] next", Tasks.Continuation("- [x] item", "next"));
+        Assert.Equal("1. [ ] next", Tasks.Continuation("1. [x] item", "next"));
+        Assert.Equal(7, Tasks.ContentOffset("1. [ ] item"));
+        Assert.True(Tasks.IsMarkerOffset("1. [ ] item", 4));
+        Assert.False(Tasks.IsMarkerOffset("1. [ ] item", 7));
+    }
+
+    [Fact]
+    public void MarkdownBulletsExposeTheirSourceMarkerPosition()
+    {
+        Assert.True(Markdown.TryGetBullet("  - item", out var markerIndex));
+        Assert.Equal(2, markerIndex);
+        Assert.False(Markdown.TryGetBullet("☐ item", out _));
+        Assert.False(Markdown.TryGetBullet("- - -", out _));
+        Assert.False(Markdown.CanBeSetextHeadingText("- item"));
+        Assert.False(Markdown.CanBeSetextHeadingText("1. item"));
+        Assert.False(Markdown.CanBeSetextHeadingText("> quote"));
+        Assert.True(Markdown.CanBeSetextHeadingText("plain title"));
+        Assert.True(Markdown.TryGetFenceOpening("```csharp", out var fenceLength));
+        Assert.Equal(3, fenceLength);
+        Assert.True(Markdown.IsFenceClosing("```", fenceLength));
+    }
+
+    [Fact]
+    public void MarkdownBulletRendersOutsideCaretLineAndRestoresAtCaret()
+    {
+        var document = new FlowDocument();
+        var first = new Paragraph(new Run("- first"));
+        var second = new Paragraph(new Run("* second"));
+        document.Blocks.Add(first);
+        document.Blocks.Add(second);
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, first);
+
+        Assert.Equal("- first", new TextRange(first.ContentStart, first.ContentEnd).Text);
+        Assert.Equal("• second", new TextRange(second.ContentStart, second.ContentEnd).Text);
+        Assert.Equal("* second", Markdown.SourceText(second));
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, second);
+
+        Assert.Equal("• first", new TextRange(first.ContentStart, first.ContentEnd).Text);
+        Assert.Equal("- first", Markdown.SourceText(first));
+        Assert.Equal("* second", new TextRange(second.ContentStart, second.ContentEnd).Text);
+        Assert.Equal("* second", Markdown.SourceText(second));
+    }
+
+    [Fact]
+    public void ThematicBreakShowsOnlySourceAtCaret()
+    {
+        var document = new FlowDocument();
+        var paragraph = new Paragraph(new Run("---"));
+        document.Blocks.Add(paragraph);
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, paragraph);
+
+        Assert.Equal(0, paragraph.BorderThickness.Bottom);
+        Assert.Equal("---", new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text);
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, activeParagraph: null);
+
+        Assert.Equal(1, paragraph.BorderThickness.Bottom);
+        var range = new TextRange(paragraph.ContentStart, paragraph.ContentEnd);
+        Assert.Equal(0.1, (double)range.GetPropertyValue(TextElement.FontSizeProperty), 3);
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, paragraph);
+
+        Assert.Equal(0, paragraph.BorderThickness.Bottom);
+        Assert.Equal(14, (double)range.GetPropertyValue(TextElement.FontSizeProperty), 3);
+    }
+
+    [Fact]
+    public void MarkdownHeadingMarkersRenderOutsideCaretLine()
+    {
+        var document = new FlowDocument();
+        var paragraph = new Paragraph(new Run("## Heading"));
+        document.Blocks.Add(paragraph);
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, paragraph);
+
+        var marker = new TextRange(
+            Markdown.PositionAtTextOffset(paragraph, 0),
+            Markdown.PositionAtTextOffset(paragraph, 2));
+        Assert.Equal(14, (double)marker.GetPropertyValue(TextElement.FontSizeProperty), 3);
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, activeParagraph: null);
+
+        Assert.Equal(0.1, (double)marker.GetPropertyValue(TextElement.FontSizeProperty), 3);
+        var heading = new TextRange(
+            Markdown.PositionAtTextOffset(paragraph, 3),
+            Markdown.PositionAtTextOffset(paragraph, 10));
+        Assert.Equal(18, (double)heading.GetPropertyValue(TextElement.FontSizeProperty), 3);
+    }
+
+    [Fact]
+    public void MarkdownCaretLinePreservesChineseSourceText()
+    {
+        var document = new FlowDocument();
+        var paragraph = new Paragraph(new Run("# 中文输入法"));
+        document.Blocks.Add(paragraph);
+
+        Markdown.StyleDocument(document, NoteColor.At(0), 14, paragraph);
+
+        Assert.Equal("# 中文输入法", Markdown.SourceText(paragraph));
+        Assert.Equal("# 中文输入法", new TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text);
+    }
+
+    [Fact]
     public void DeriveTitleRemovesHeadingAndTaskMarker()
     {
-        var note = new Note { Body = "## ☐ Plan the release\nDetails" };
+        var note = new Note { Body = "## ☐ Plan the release\nDetails", MarkdownEnabled = true };
         note.DeriveTitle();
         Assert.Equal("Plan the release", note.Title);
+    }
+
+    [Fact]
+    public void PlainTextTitleKeepsLeadingHash()
+    {
+        var note = new Note { Body = "# 中文标题", MarkdownEnabled = false };
+
+        note.DeriveTitle();
+
+        Assert.Equal("# 中文标题", note.Title);
+
+        note.Body = "- [ ] 原样文本";
+        note.DeriveTitle();
+        Assert.Equal("- [ ] 原样文本", note.Title);
+    }
+
+    [Fact]
+    public void PerNoteTextModeSurvivesRestart()
+    {
+        var directory = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), "FlankNote.Tests", System.Guid.NewGuid().ToString("N"));
+        bool previous = Settings.Markdown;
+        try
+        {
+            Settings.Markdown = true;
+            var store = new NotesStore(directory);
+            var markdownNote = store.Create("# Markdown");
+            var plainNote = store.Create("# 纯文本");
+            plainNote.MarkdownEnabled = false;
+            store.Update(plainNote);
+
+            var reloaded = new NotesStore(directory);
+            reloaded.Load();
+
+            Assert.True(reloaded.ById(markdownNote.Id)!.UsesMarkdown);
+            Assert.False(reloaded.ById(plainNote.Id)!.UsesMarkdown);
+        }
+        finally
+        {
+            Settings.Markdown = previous;
+            if (System.IO.Directory.Exists(directory))
+                System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void NewNotesUseCurrentMarkdownDefault(bool markdownDefault)
+    {
+        var directory = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), "FlankNote.Tests", System.Guid.NewGuid().ToString("N"));
+        bool previous = Settings.Markdown;
+        try
+        {
+            Settings.Markdown = markdownDefault;
+
+            var note = new NotesStore(directory).Create("# text");
+
+            Assert.Equal(markdownDefault, note.UsesMarkdown);
+            Assert.Equal(markdownDefault ? "text" : "# text", note.Title);
+        }
+        finally
+        {
+            Settings.Markdown = previous;
+            if (System.IO.Directory.Exists(directory))
+                System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LegacyNotesInheritSavedMarkdownDefault(bool markdownDefault)
+    {
+        var directory = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), "FlankNote.Tests", System.Guid.NewGuid().ToString("N"));
+        bool previous = Settings.Markdown;
+        try
+        {
+            System.IO.Directory.CreateDirectory(directory);
+            System.IO.File.WriteAllText(
+                System.IO.Path.Combine(directory, "notes.json"),
+                $"{{\"notes\":[{{\"Id\":\"legacy\",\"Body\":\"# text\"}}],\"markdown\":{markdownDefault.ToString().ToLowerInvariant()}}}");
+
+            var store = new NotesStore(directory);
+            store.Load();
+
+            Assert.Equal(markdownDefault, store.ById("legacy")!.UsesMarkdown);
+            Assert.Equal(markdownDefault, store.ById("legacy")!.MarkdownEnabled);
+        }
+        finally
+        {
+            Settings.Markdown = previous;
+            if (System.IO.Directory.Exists(directory))
+                System.IO.Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -383,7 +651,7 @@ public sealed class CoreLogicTests
                 <updated>2026-09-02T06:07:11Z</updated>
                 <link rel="alternate" type="text/html" href="https://github.com/nostalgicz/FlankNote/releases/tag/v1.0.0" />
                 <title>FlankNote v1.0.0</title>
-                <content type="html">&lt;p&gt;Preview version.&lt;/p&gt;</content>
+                <content type="html">&lt;h2&gt;新增&lt;/h2&gt;&lt;ul&gt;&lt;li&gt;支持列表&lt;/li&gt;&lt;li&gt;修复问题&lt;/li&gt;&lt;/ul&gt;</content>
               </entry>
             </feed>
             """);
@@ -393,14 +661,16 @@ public sealed class CoreLogicTests
         Assert.NotNull(release);
         Assert.Equal("v1.0.0", release.TagName);
         Assert.Equal("FlankNote v1.0.0", release.Name);
-        Assert.Equal("Preview version.", release.Body);
+        Assert.Equal("## 新增\n- 支持列表\n- 修复问题", release.Body);
         Assert.Equal("https://github.com/nostalgicz/FlankNote/releases/tag/v1.0.0", release.HtmlUrl);
     }
 
     [Fact]
     public void LaterPatchVersionIsNewerThanCurrentVersion()
     {
-        Assert.True(GitHubUpdateService.IsNewer("v1.0.1"));
+        var current = typeof(GitHubUpdateService).Assembly.GetName().Version ?? new System.Version(0, 0, 0);
+        var later = new System.Version(current.Major, current.Minor, current.Build + 1);
+        Assert.True(GitHubUpdateService.IsNewer($"v{later}"));
     }
 
     [Fact]

@@ -114,7 +114,7 @@ static class GitHubUpdateService
         return new GitHubRelease(
             tag,
             entry.Element(atom + "title")?.Value ?? tag,
-            ToPlainText(entry.Element(atom + "content")?.Value ?? ""),
+            ToMarkdown(entry.Element(atom + "content")?.Value ?? ""),
             link,
             DateTimeOffset.TryParse(updated, out var date) ? date : null);
     }
@@ -126,10 +126,30 @@ static class GitHubUpdateService
         return Uri.UnescapeDataString(value);
     }
 
-    static string ToPlainText(string html)
+    // The Atom fallback exposes rendered HTML rather than the original
+    // release Markdown. Preserve the block structure that the in-app
+    // renderer understands so rate-limit fallback does not flatten notes.
+    static string ToMarkdown(string html)
     {
         var decoded = WebUtility.HtmlDecode(html);
-        return Regex.Replace(decoded, "<[^>]+>", " ").Trim();
+        decoded = Regex.Replace(decoded, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+        for (int level = 1; level <= 6; level++)
+        {
+            string heading = new string('#', level);
+            decoded = Regex.Replace(decoded, $@"<h{level}\b[^>]*>", heading + " ", RegexOptions.IgnoreCase);
+            decoded = Regex.Replace(decoded, $@"</h{level}\s*>", "\n", RegexOptions.IgnoreCase);
+        }
+        decoded = Regex.Replace(decoded, @"<li\b[^>]*>", "- ", RegexOptions.IgnoreCase);
+        decoded = Regex.Replace(decoded, @"</(p|div|li|ul|ol|blockquote|pre)\s*>", "\n", RegexOptions.IgnoreCase);
+        decoded = Regex.Replace(decoded, @"<hr\b[^>]*>", "\n---\n", RegexOptions.IgnoreCase);
+        decoded = Regex.Replace(decoded, "<[^>]+>", "");
+        decoded = WebUtility.HtmlDecode(decoded);
+
+        var lines = decoded.Replace("\r\n", "\n").Replace('\r', '\n')
+            .Split('\n')
+            .Select(line => line.TrimEnd())
+            .ToArray();
+        return string.Join("\n", lines).Trim();
     }
 
     public static async Task<string> DownloadInstallerAsync(

@@ -79,6 +79,9 @@ class Note
     public string Title { get; set; } = "";
     public bool HasCustomTitle { get; set; }
     public string Body { get; set; } = "";
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public bool? MarkdownEnabled { get; set; }
     public int Color { get; set; }
     public string? CustomColor { get; set; }
     public double WindowWidth { get; set; } = Geom.EditorWidth + Geom.WindowInset;
@@ -97,13 +100,15 @@ class Note
     [System.Text.Json.Serialization.JsonIgnore]
     public bool HasCustomColor => NoteColor.TryCustom(CustomColor, out _);
     [System.Text.Json.Serialization.JsonIgnore]
+    public bool UsesMarkdown => MarkdownEnabled ?? Settings.Markdown;
+    [System.Text.Json.Serialization.JsonIgnore]
     public string DisplayTitle => Title.Length == 0 ? "New note" : Title;
 
     public void DeriveTitle()
     {
         var line = Body.Split('\n').FirstOrDefault()?.Trim() ?? "";
-        line = Regex.Replace(line, @"^#{1,6}\s*", "");
-        line = Tasks.Strip(line);
+        if (UsesMarkdown) line = Regex.Replace(line, @"^#{1,6}\s*", "");
+        line = Tasks.Strip(line, UsesMarkdown);
         Title = line.Length > 60 ? line[..60] + "…" : line;
     }
 }
@@ -111,22 +116,80 @@ class Note
 static class Tasks
 {
     public const char Open = '☐', Done = '☑';
-    public static bool IsOpen(string line) => line.StartsWith(Open + " ");
-    public static bool IsDone(string line) => line.StartsWith(Done + " ");
+    static readonly System.Text.RegularExpressions.Regex MarkdownTask = new(
+        @"^(?<prefix>\s*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+))(?<box>\[[ xX]\])(?<space>[ \t]+|$)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    public static bool TryGetMarkdownMarker(string line, out int boxStart, out int markerEnd, out bool done)
+    {
+        var match = MarkdownTask.Match(line);
+        boxStart = match.Success ? match.Groups["box"].Index : -1;
+        markerEnd = match.Success ? match.Length : -1;
+        done = match.Success && match.Groups["box"].Value.Equals("[x]", StringComparison.OrdinalIgnoreCase);
+        return match.Success;
+    }
+
+    public static bool IsOpen(string line)
+        => line.StartsWith(Open + " ")
+            || (TryGetMarkdownMarker(line, out _, out _, out bool done) && !done);
+
+    public static bool IsDone(string line)
+        => line.StartsWith(Done + " ")
+            || (TryGetMarkdownMarker(line, out _, out _, out bool done) && done);
+
     public static bool IsTask(string line) => IsOpen(line) || IsDone(line);
-    public static string Strip(string line) => IsTask(line) ? line[2..] : line;
-    public static (int Done, int Total) Progress(string body)
+    public static string Strip(string line, bool markdownEnabled = true)
+    {
+        if (line.StartsWith(Open + " ") || line.StartsWith(Done + " "))
+            return line[2..];
+        return markdownEnabled && TryGetMarkdownMarker(line, out _, out int markerEnd, out _)
+            ? line[markerEnd..] : line;
+    }
+    public static (int Done, int Total) Progress(string body, bool markdownEnabled = true)
     {
         int done = 0, total = 0;
         foreach (var line in body.Split('\n'))
         {
-            if (IsDone(line)) { total++; done++; }
-            else if (IsOpen(line)) total++;
+            bool nativeDone = line.StartsWith(Done + " ");
+            bool nativeOpen = line.StartsWith(Open + " ");
+            if (nativeDone || (markdownEnabled && IsDone(line))) { total++; done++; }
+            else if (nativeOpen || (markdownEnabled && IsOpen(line))) total++;
         }
         return (done, total);
     }
     public static string Toggle(string line)
-        => IsDone(line) ? Open + line[1..] : (IsOpen(line) ? Done + line[1..] : Done + " " + line);
+    {
+        if (line.StartsWith(Open + " ")) return Done + line[1..];
+        if (line.StartsWith(Done + " ")) return Open + line[1..];
+
+        if (TryGetMarkdownMarker(line, out int boxStart, out int markerEnd, out bool done))
+        {
+            string replacement = done ? "[ ]" : "[x]";
+            return line[..boxStart] + replacement + line[(boxStart + 3)..];
+        }
+        return Done + " " + line;
+    }
+
+    public static string Continuation(string source, string body)
+    {
+        if (TryGetMarkdownMarker(source, out int boxStart, out _, out _))
+            return source[..boxStart] + "[ ] " + body;
+        return Open + " " + body;
+    }
+
+    public static int ContentOffset(string line)
+    {
+        if (line.StartsWith(Open + " ") || line.StartsWith(Done + " ")) return 2;
+        return TryGetMarkdownMarker(line, out _, out int markerEnd, out _)
+            ? markerEnd : 0;
+    }
+
+    public static bool IsMarkerOffset(string line, int offset)
+    {
+        if (line.StartsWith(Open + " ") || line.StartsWith(Done + " ")) return offset <= 1;
+        return TryGetMarkdownMarker(line, out int boxStart, out int markerEnd, out _)
+            && offset >= boxStart && offset < markerEnd;
+    }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -200,6 +263,8 @@ class NotesStore
                 Settings.AutoCollapseNote = root?.autoCollapseNote ?? false;
                 Settings.WakeDistance = root?.wakeDistance is > 0 ? root.wakeDistance : 40;
                 Settings.Markdown = root?.markdown ?? true;
+                foreach (var note in Notes)
+                    note.MarkdownEnabled ??= Settings.Markdown;
                 Settings.OverlayFullscreen = root?.overlayFullscreen ?? true;
                 Settings.Language = root?.language is "zh" or "en" ? root.language : "en";
                 // Existing data predating the welcome page belongs to an upgrade,
@@ -283,6 +348,7 @@ class NotesStore
         var n = new Note
         {
             Body = body,
+            MarkdownEnabled = Settings.Markdown,
             Color = color ?? (Notes.Count % NoteColor.All.Length),
             Order = (Notes.Count == 0 ? 0 : Notes.Min(x => x.Order)) - 1,   // newest at the top
         };

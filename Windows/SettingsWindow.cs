@@ -164,7 +164,7 @@ class SettingsWindow : Window
             App.Deck.NoteActivity();
         }));
         options.Children.Add(Divider());
-        options.Children.Add(ToggleRow(Loc.T("Markdown styling", "Markdown 样式"), () => _markdown, value => _markdown = value));
+        options.Children.Add(ToggleRow(Loc.T("Use Markdown for new notes", "新便签默认使用 Markdown"), () => _markdown, value => _markdown = value));
         options.Children.Add(Divider());
         options.Children.Add(ToggleRow(Loc.T("Show over full-screen apps", "应用显示前最前"), () => _overlay, value => _overlay = value));
         options.Children.Add(Divider());
