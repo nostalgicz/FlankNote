@@ -12,19 +12,20 @@ namespace FlankNote;
 /// collapsed elsewhere while the stored source remains unchanged.</summary>
 static class Markdown
 {
-    static readonly Regex Heading = new(@"^(?<marks>#{1,6})[ \t]+(?<text>.*?)(?:[ \t]+(?<closing>#+)[ \t]*)?$", RegexOptions.Compiled);
-    static readonly Regex Setext = new(@"^\s*(?<marks>=+|-+)\s*$", RegexOptions.Compiled);
-    static readonly Regex ThematicBreak = new(@"^\s*(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$", RegexOptions.Compiled);
-    static readonly Regex OrderedList = new(@"^(?<indent>[ \t]*)(?<marker>\d+[.)])[ \t]+", RegexOptions.Compiled);
-    static readonly Regex Bullet = new(@"^(?<indent>[ \t]*)(?<marker>[-*+])[ \t]+", RegexOptions.Compiled);
-    static readonly Regex Bold = new(@"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", RegexOptions.Compiled);
-    static readonly Regex Italic = new(@"(?<![\*_])([\*_])(?=[^\*_\s])(.+?)(?<=[^\*_\s])\1(?![\*_])", RegexOptions.Compiled);
-    static readonly Regex InlineCode = new(@"`([^`\r\n]+)`", RegexOptions.Compiled);
-    static readonly Regex Struck = new(@"~~(?=\S)(.+?)(?<=\S)~~", RegexOptions.Compiled);
-    static readonly Regex Quote = new(@"^(?<marks>>+)[ \t]?(?<text>.*)$", RegexOptions.Compiled);
-    static readonly Regex Link = new(@"(?<!!)\[([^\]\r\n]+)\]\(([^)\s]+)\)", RegexOptions.Compiled);
-    static readonly Regex Autolink = new(@"<(?<url>(?:https?://|mailto:)[^>\s]+)>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    static readonly Regex FenceOpen = new(@"^\s*(?<ticks>`{3,})(?<info>[^`]*)$", RegexOptions.Compiled);
+    const RegexOptions SmallRegex = RegexOptions.CultureInvariant;
+    static readonly Regex Heading = new(@"^(?<marks>#{1,6})[ \t]+(?<text>.*?)(?:[ \t]+(?<closing>#+)[ \t]*)?$", SmallRegex);
+    static readonly Regex Setext = new(@"^\s*(?<marks>=+|-+)\s*$", SmallRegex);
+    static readonly Regex ThematicBreak = new(@"^\s*(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$", SmallRegex);
+    static readonly Regex OrderedList = new(@"^(?<indent>[ \t]*)(?<marker>\d+[.)])[ \t]+", SmallRegex);
+    static readonly Regex Bullet = new(@"^(?<indent>[ \t]*)(?<marker>[-*+])[ \t]+", SmallRegex);
+    static readonly Regex Bold = new(@"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", SmallRegex);
+    static readonly Regex Italic = new(@"(?<![\*_])([\*_])(?=[^\*_\s])(.+?)(?<=[^\*_\s])\1(?![\*_])", SmallRegex);
+    static readonly Regex InlineCode = new(@"`([^`\r\n]+)`", SmallRegex);
+    static readonly Regex Struck = new(@"~~(?=\S)(.+?)(?<=\S)~~", SmallRegex);
+    static readonly Regex Quote = new(@"^(?<marks>>+)[ \t]?(?<text>.*)$", SmallRegex);
+    static readonly Regex Link = new(@"(?<!!)\[([^\]\r\n]+)\]\(([^)\s]+)\)", SmallRegex);
+    static readonly Regex Autolink = new(@"<(?<url>(?:https?://|mailto:)[^>\s]+)>", SmallRegex | RegexOptions.IgnoreCase);
+    static readonly Regex FenceOpen = new(@"^\s*(?<ticks>`{3,})(?<info>[^`]*)$", SmallRegex);
     sealed record RenderedBullet(int Index, char SourceMarker);
 
     static TextRange Marker(Paragraph p, int start, int length)
@@ -133,15 +134,7 @@ static class Markdown
     public static void StyleDocument(FlowDocument document, NoteColor pal, double baseSize,
                                      Paragraph? activeParagraph)
     {
-        var wholeDocument = new TextRange(document.ContentStart, document.ContentEnd);
-        wholeDocument.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Normal);
-        wholeDocument.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Normal);
-        wholeDocument.ApplyPropertyValue(TextElement.FontFamilyProperty,
-            new FontFamily("Segoe UI, Microsoft YaHei UI"));
-        wholeDocument.ApplyPropertyValue(TextElement.ForegroundProperty, pal.InkB);
-        wholeDocument.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize);
-        wholeDocument.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
-        wholeDocument.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
+        ResetDocument(document, pal.InkB, baseSize);
 
         // Applying TextRange properties can split or merge WPF Runs. That bumps
         // the document text-tree version and invalidates a live Blocks
@@ -154,14 +147,14 @@ static class Markdown
         var texts = paragraphs
             .Select(p => new TextRange(p.ContentStart, p.ContentEnd).Text)
             .ToArray();
-        var setextHeadings = new HashSet<Paragraph>();
-        var setextMarkers = new HashSet<Paragraph>();
+        var setextHeadings = new bool[paragraphs.Length];
+        var setextMarkers = new bool[paragraphs.Length];
         for (int i = 1; i < paragraphs.Length; i++)
         {
             if (CanBeSetextHeadingText(texts[i - 1]) && Setext.IsMatch(texts[i]))
             {
-                setextHeadings.Add(paragraphs[i - 1]);
-                setextMarkers.Add(paragraphs[i]);
+                setextHeadings[i - 1] = true;
+                setextMarkers[i] = true;
             }
         }
 
@@ -179,7 +172,7 @@ static class Markdown
                     if (!ReferenceEquals(paragraph, activeParagraph))
                         StyleFenceMarker(paragraph, pal, reveal: false);
                 }
-                else if (setextMarkers.Contains(paragraph))
+                else if (setextMarkers[i])
                 {
                     if (!ReferenceEquals(paragraph, activeParagraph))
                         StyleSetextMarker(paragraph, pal, reveal: false);
@@ -187,12 +180,12 @@ static class Markdown
                 else if (!ReferenceEquals(paragraph, activeParagraph))
                 {
                     StyleParagraph(paragraph, pal, baseSize, revealMarkers: false,
-                        setextHeadings.Contains(paragraph)
+                        setextHeadings[i]
                             ? (Setext.Match(texts[i + 1]).Groups["marks"].Value[0] == '=' ? 1 : 2)
                             : null);
                 }
             }
-            else if (Regex.IsMatch(text, $@"^\s*`{{{fenceLength},}}\s*$"))
+            else if (IsFenceClosing(text, fenceLength))
             {
                 if (!ReferenceEquals(paragraph, activeParagraph))
                     StyleFenceMarker(paragraph, pal, reveal: false);
@@ -203,6 +196,18 @@ static class Markdown
                 StyleCodeBlock(paragraph, pal);
             }
         }
+    }
+
+    public static void ResetDocument(FlowDocument document, Brush foreground, double baseSize)
+    {
+        var wholeDocument = new TextRange(document.ContentStart, document.ContentEnd);
+        wholeDocument.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Normal);
+        wholeDocument.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Normal);
+        wholeDocument.ApplyPropertyValue(TextElement.FontFamilyProperty, UiTheme.Font);
+        wholeDocument.ApplyPropertyValue(TextElement.ForegroundProperty, foreground);
+        wholeDocument.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize);
+        wholeDocument.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
+        wholeDocument.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
     }
 
     public static void ClearBlockStyles(FlowDocument document)
@@ -256,7 +261,14 @@ static class Markdown
     }
 
     public static bool IsFenceClosing(string text, int length)
-        => length >= 3 && Regex.IsMatch(text, $@"^\s*`{{{length},}}\s*$");
+    {
+        if (length < 3) return false;
+        var value = text.AsSpan().Trim();
+        if (value.Length < length) return false;
+        foreach (char character in value)
+            if (character != '`') return false;
+        return true;
+    }
 
     static void ClearBlockStyles(IEnumerable<Paragraph> paragraphs)
     {
@@ -274,18 +286,18 @@ static class Markdown
     static void StyleCodeBlock(Paragraph paragraph, NoteColor pal)
     {
         paragraph.Padding = new Thickness(7, 2, 7, 2);
-        paragraph.Background = new SolidColorBrush(pal.Ink) { Opacity = 0.07 };
+        paragraph.Background = UiTheme.Tint(pal.Ink, 0.07);
         var range = new TextRange(paragraph.ContentStart, paragraph.ContentEnd);
-        range.ApplyPropertyValue(TextElement.FontFamilyProperty, new FontFamily("Cascadia Mono, Consolas"));
-        range.ApplyPropertyValue(TextElement.ForegroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.90 });
+        range.ApplyPropertyValue(TextElement.FontFamilyProperty, UiTheme.MonospaceFont);
+        range.ApplyPropertyValue(TextElement.ForegroundProperty, UiTheme.Tint(pal.Ink, 0.90));
     }
 
     static void StyleFenceMarker(Paragraph paragraph, NoteColor pal, bool reveal)
     {
         var range = new TextRange(paragraph.ContentStart, paragraph.ContentEnd);
-        range.ApplyPropertyValue(TextElement.FontFamilyProperty, new FontFamily("Cascadia Mono, Consolas"));
+        range.ApplyPropertyValue(TextElement.FontFamilyProperty, UiTheme.MonospaceFont);
         if (reveal)
-            range.ApplyPropertyValue(TextElement.ForegroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.32 });
+            range.ApplyPropertyValue(TextElement.ForegroundProperty, UiTheme.Tint(pal.Ink, 0.32));
         else
             Hide(range);
     }
@@ -293,11 +305,11 @@ static class Markdown
     static void StyleSetextMarker(Paragraph paragraph, NoteColor pal, bool reveal)
     {
         paragraph.Padding = new Thickness(0, 3, 0, 3);
-        paragraph.BorderBrush = new SolidColorBrush(pal.Dash) { Opacity = 0.45 };
+        paragraph.BorderBrush = UiTheme.Tint(pal.Dash, 0.45);
         paragraph.BorderThickness = new Thickness(0, 0, 0, 1);
         var range = new TextRange(paragraph.ContentStart, paragraph.ContentEnd);
         if (reveal) range.ApplyPropertyValue(TextElement.ForegroundProperty,
-            new SolidColorBrush(pal.Ink) { Opacity = 0.30 });
+            UiTheme.Tint(pal.Ink, 0.30));
         else Hide(range);
     }
 
@@ -319,7 +331,7 @@ static class Markdown
         if (Tasks.IsDone(text))
         {
             body.ApplyPropertyValue(Inline.TextDecorationsProperty, TextDecorations.Strikethrough);
-            body.ApplyPropertyValue(TextElement.ForegroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.55 });
+            body.ApplyPropertyValue(TextElement.ForegroundProperty, UiTheme.Tint(pal.Ink, 0.55));
         }
         // ATX headings: levels 1-6
         var heading = Heading.Match(text);
@@ -327,8 +339,8 @@ static class Markdown
         {
             int level = heading.Groups["marks"].Length;
             body.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.SemiBold);
-            double[] additions = [5, 4, 3, 2, 1, 0.5];
-            body.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize + additions[level - 1]);
+            double addition = level switch { 1 => 5, 2 => 4, 3 => 3, 4 => 2, 5 => 1, _ => 0.5 };
+            body.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize + addition);
             StyleMarker(Marker(p, 0, level), pal, revealMarkers);
             if (heading.Groups["closing"].Success)
                 StyleMarker(Marker(p, heading.Groups["closing"].Index,
@@ -337,19 +349,18 @@ static class Markdown
         else if (setextLevel is { } level)
         {
             body.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.SemiBold);
-            double[] additions = [5, 3];
-            body.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize + additions[level - 1]);
+            body.ApplyPropertyValue(TextElement.FontSizeProperty, baseSize + (level == 1 ? 5 : 3));
         }
 
         var quote = Quote.Match(text);
         if (quote.Success)
         {
             int depth = quote.Groups["marks"].Length;
-            body.ApplyPropertyValue(TextElement.ForegroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.62 });
+            body.ApplyPropertyValue(TextElement.ForegroundProperty, UiTheme.Tint(pal.Ink, 0.62));
             body.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Italic);
             p.Margin = new Thickness(8 + (depth - 1) * 8, 1, 0, 1);
             p.Padding = new Thickness(10, 1, 0, 1);
-            p.BorderBrush = new SolidColorBrush(pal.Dash) { Opacity = 0.55 };
+            p.BorderBrush = UiTheme.Tint(pal.Dash, 0.55);
             p.BorderThickness = new Thickness(2, 0, 0, 0);
             StyleMarker(Marker(p, 0, depth), pal, revealMarkers);
         }
@@ -405,8 +416,8 @@ static class Markdown
                 range.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Normal);
                 range.ApplyPropertyValue(TextElement.ForegroundProperty, pal.InkB);
                 range.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
-                range.ApplyPropertyValue(TextElement.FontFamilyProperty, new FontFamily("Cascadia Mono, Consolas"));
-                range.ApplyPropertyValue(TextElement.BackgroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.07 });
+                range.ApplyPropertyValue(TextElement.FontFamilyProperty, UiTheme.MonospaceFont);
+                range.ApplyPropertyValue(TextElement.BackgroundProperty, UiTheme.Tint(pal.Ink, 0.07));
             });
         // Run links last so Markdown-like characters inside a URL cannot make
         // its hidden destination visible again.
@@ -429,12 +440,12 @@ static class Markdown
     static void StyleThematicBreak(Paragraph paragraph, NoteColor pal, bool reveal)
     {
         paragraph.Padding = new Thickness(0, 4, 0, 4);
-        paragraph.BorderBrush = new SolidColorBrush(pal.Dash) { Opacity = 0.42 };
+        paragraph.BorderBrush = UiTheme.Tint(pal.Dash, 0.42);
         paragraph.BorderThickness = new Thickness(0, 0, 0, 1);
         var range = new TextRange(paragraph.ContentStart, paragraph.ContentEnd);
         if (reveal)
             range.ApplyPropertyValue(TextElement.ForegroundProperty,
-                new SolidColorBrush(pal.Ink) { Opacity = 0.30 });
+                UiTheme.Tint(pal.Ink, 0.30));
         else
             Hide(range);
     }
@@ -486,7 +497,7 @@ static class Markdown
     static void StyleMarker(TextRange range, NoteColor pal, bool reveal)
     {
         if (reveal)
-            range.ApplyPropertyValue(TextElement.ForegroundProperty, new SolidColorBrush(pal.Ink) { Opacity = 0.32 });
+            range.ApplyPropertyValue(TextElement.ForegroundProperty, UiTheme.Tint(pal.Ink, 0.32));
         else
             Hide(range);
     }

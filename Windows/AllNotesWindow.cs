@@ -261,7 +261,19 @@ class AllNotesWindow : Window
         {
             if (e.Key == Key.Escape) { Save(); Close(); }
         };
-        Closed += (_, _) => { Save(); if (_archivedOnly) App.ArchiveWin = null; else App.AllNotes = null; };
+        Closed += (_, _) =>
+        {
+            Save();
+            _autosave.Stop();
+            _loading = true;
+            _current = null;
+            _colourPopup.IsOpen = false;
+            _colourPopup.Child = null;
+            _list.Items.Clear();
+            Content = null;
+            if (_archivedOnly) App.ArchiveWin = null; else App.AllNotes = null;
+            MemoryCleanup.Schedule(Dispatcher);
+        };
 
         Loaded += (_, _) => RefreshList();
         DisplayService.CenterOnSelected(this);
@@ -566,21 +578,16 @@ class AllNotesWindow : Window
         try
         {
             var doc = _body.Document;
-            var all = new TextRange(doc.ContentStart, doc.ContentEnd);
-            all.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Normal);
-            all.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Normal);
-            all.ApplyPropertyValue(TextElement.FontFamilyProperty, new FontFamily("Segoe UI, Microsoft YaHei UI"));
-            all.ApplyPropertyValue(TextElement.ForegroundProperty, TextInk);
-            all.ApplyPropertyValue(TextElement.FontSizeProperty, 14.0);
-            all.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
-            all.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
             var editingParagraph = CurrentEditingParagraph();
             _editingMarkdownParagraph = editingParagraph;
             if (_current?.UsesMarkdown == true)
                 Markdown.StyleDocument(doc, _current?.Palette ?? NoteColor.At(0), 14.0,
                     editingParagraph);
             else
+            {
                 Markdown.RestoreSourceMarkers(doc);
+                Markdown.ResetDocument(doc, TextInk, 14.0);
+            }
         }
         catch (Exception ex)
         {

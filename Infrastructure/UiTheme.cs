@@ -13,6 +13,8 @@ namespace FlankNote;
 /// <summary>Shared visual tokens for application-owned windows.</summary>
 static class UiTheme
 {
+    static readonly Dictionary<(Color Color, int Opacity), SolidColorBrush> Tints = [];
+
     static SolidColorBrush Make(uint rgb)
     {
         var brush = new SolidColorBrush(Color.FromRgb(
@@ -48,9 +50,26 @@ static class UiTheme
     public static readonly Brush ColourSpectrum = MakeSpectrum();
 
     public static readonly FontFamily Font = new("Segoe UI, Microsoft YaHei UI");
+    public static readonly FontFamily MonospaceFont = new("Cascadia Mono, Consolas");
     public static readonly FontFamily Symbols = new("Segoe Fluent Icons, Segoe MDL2 Assets");
     public static readonly CornerRadius WindowRadius = new(12);
     public static readonly CornerRadius ControlRadius = new(7);
+
+    public static SolidColorBrush Tint(Color color, double opacity = 1)
+    {
+        int opacityKey = (int)Math.Round(Math.Clamp(opacity, 0, 1) * 1000);
+        var key = (color, opacityKey);
+        lock (Tints)
+        {
+            if (Tints.TryGetValue(key, out var existing)) return existing;
+            var brush = new SolidColorBrush(color) { Opacity = opacityKey / 1000.0 };
+            brush.Freeze();
+            // Custom note colours are user-controlled. Keep the shared cache
+            // bounded so repeatedly choosing new colours cannot grow it forever.
+            if (Tints.Count < 256) Tints[key] = brush;
+            return brush;
+        }
+    }
 
     /// <summary>
     /// ScrollViewer templates assign the platform scrollbar width as a local
@@ -74,7 +93,8 @@ static class UiTheme
     }
 
     /// <summary>Application-owned title bar shared by every ordinary window.</summary>
-    public static UIElement WithWindowChrome(Window window, string title, UIElement body)
+    public static UIElement WithWindowChrome(Window window, string title, UIElement body,
+                                             bool dialog = false)
     {
         window.WindowStyle = WindowStyle.None;
         // A rounded child alone is insufficient: an opaque HWND still paints a
@@ -127,8 +147,11 @@ static class UiTheme
             window.WindowState = window.WindowState == WindowState.Maximized
                 ? WindowState.Normal : WindowState.Maximized;
         close.MouseLeftButtonUp += (_, _) => window.Close();
-        controls.Children.Add(minimize);
-        controls.Children.Add(maximize);
+        if (!dialog)
+        {
+            controls.Children.Add(minimize);
+            controls.Children.Add(maximize);
+        }
         controls.Children.Add(close);
         Grid.SetColumn(controls, 1);
         bar.Children.Add(controls);

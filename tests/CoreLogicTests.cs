@@ -6,6 +6,82 @@ namespace FlankNote.Tests;
 
 public sealed class CoreLogicTests
 {
+    [Theory]
+    [InlineData(0, 1, 1, 255, 0, 0)]
+    [InlineData(120, 1, 1, 0, 255, 0)]
+    [InlineData(240, 1, 1, 0, 0, 255)]
+    [InlineData(0, 0, 0.5, 128, 128, 128)]
+    public void ColourPickerConvertsHsvToRgb(
+        double hue, double saturation, double value, byte red, byte green, byte blue)
+    {
+        var color = ColourPickerDialog.FromHsv(hue, saturation, value);
+
+        Assert.Equal(red, color.R);
+        Assert.Equal(green, color.G);
+        Assert.Equal(blue, color.B);
+    }
+
+    [Fact]
+    public void ColourPickerHsvRoundTripPreservesColour()
+    {
+        var original = System.Windows.Media.Color.FromRgb(0x38, 0x92, 0xC7);
+
+        var hsv = ColourPickerDialog.ToHsv(original);
+        var restored = ColourPickerDialog.FromHsv(hsv.Hue, hsv.Saturation, hsv.Value);
+
+        Assert.Equal(original, restored);
+    }
+
+    [Fact]
+    public void ColourPickerOpensBesideTheLeftEdgeOfTheNote()
+    {
+        var owner = new System.Windows.Rect(1200, 100, 520, 600);
+        var work = new System.Windows.Rect(0, 0, 1920, 1040);
+
+        var result = ColourPickerDialog.CalculateBounds(
+            owner, work, new System.Windows.Size(400, 430));
+
+        Assert.Equal(owner.Left - 412, result.Left);
+        Assert.True(result.Right < owner.Left);
+        Assert.True(result.Top >= work.Top);
+        Assert.True(result.Bottom <= work.Bottom);
+    }
+
+    [Fact]
+    public void TrayMenuBoundsStayInsideMonitorWorkArea()
+    {
+        var work = new System.Drawing.Rectangle(-1920, 0, 1920, 1040);
+        var cursor = new System.Drawing.Point(-12, 1030);
+
+        var result = TrayMenuWindow.CalculateBounds(cursor, work, 260, 430);
+
+        Assert.True(result.Left >= work.Left);
+        Assert.True(result.Top >= work.Top);
+        Assert.True(result.Right <= work.Right);
+        Assert.True(result.Bottom <= work.Bottom);
+        Assert.True(result.Bottom <= cursor.Y);
+    }
+
+    [Fact]
+    public void TabPreviewOnlyBuildsTheVisibleExcerpt()
+    {
+        string body = string.Join('\n', Enumerable.Range(1, 40).Select(i => $"line {i}"));
+
+        string excerpt = DeckWindow.PreviewExcerpt(body, maxCharacters: 1200, maxLines: 16);
+
+        Assert.Equal(16, excerpt.Split('\n').Length);
+        Assert.Contains("line 16", excerpt);
+        Assert.DoesNotContain("line 17", excerpt);
+    }
+
+    [Fact]
+    public void TabPreviewExcerptDoesNotSplitSurrogatePairs()
+    {
+        string excerpt = DeckWindow.PreviewExcerpt("A\U0001F4DDB", maxCharacters: 2);
+
+        Assert.Equal("A", excerpt);
+    }
+
     [Fact]
     public void MarkdownPreviewRendersCommonMarkdownBlocks()
     {
@@ -106,6 +182,18 @@ public sealed class CoreLogicTests
         Assert.True(Markdown.TryGetFenceOpening("```csharp", out var fenceLength));
         Assert.Equal(3, fenceLength);
         Assert.True(Markdown.IsFenceClosing("```", fenceLength));
+        Assert.True(Markdown.IsFenceClosing("   ````   ", fenceLength));
+        Assert.False(Markdown.IsFenceClosing("``` trailing", fenceLength));
+    }
+
+    [Fact]
+    public void PaletteBrushesAreFrozenAndShared()
+    {
+        var palette = NoteColor.At(0);
+
+        Assert.Same(palette.InkB, palette.InkB);
+        Assert.Same(palette.DashB, palette.DashB);
+        Assert.True(palette.InkB.IsFrozen);
     }
 
     [Fact]

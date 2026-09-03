@@ -12,7 +12,7 @@ sealed record GitHubRelease(string TagName, string Name, string Body, string Htm
 
 static class GitHubUpdateService
 {
-    const string Endpoint = "https://api.github.com/repos/nostalgicz/FlankNote/releases/latest";
+    const string Endpoint = "https://api.github.cgom/repos/nostalgicz/FlankNote/releases/latest";
     const string FeedEndpoint = "https://github.com/nostalgicz/FlankNote/releases.atom";
     const string InstallerAssetName = "FlankNote-Setup-x64.exe";
     static readonly HttpClient Client = CreateClient();

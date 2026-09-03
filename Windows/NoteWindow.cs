@@ -54,6 +54,7 @@ class NoteWindow : Window
     readonly ScaleTransform _sheetScale = new(0.965, 0.965);
     DispatcherTimer? _transition;
     DispatcherTimer? _deactivationCheck;
+    HwndSource? _windowSource;
     bool _nativeResizing;
     bool _clampingBounds;
     Paragraph? _editingMarkdownParagraph;
@@ -97,8 +98,10 @@ class NoteWindow : Window
         SourceInitialized += (_, _) =>
         {
             ApplyOverlay();
-            HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(WindowHook);
+            _windowSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+            _windowSource?.AddHook(WindowHook);
         };
+        Closed += (_, _) => ReleaseWindowResources();
         Activated += (_, _) => ReassertOverlay();
         Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
@@ -255,7 +258,9 @@ class NoteWindow : Window
         stack.Children.Add(head);
 
         // One editor provides as-you-type Markdown: only the caret line exposes source markers.
-        _body = new RichTextBox
+        // Passing the document into the constructor avoids creating and then
+        // discarding RichTextBox's default FlowDocument.
+        _body = new RichTextBox(new FlowDocument { PagePadding = new Thickness(0) })
         {
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
@@ -267,6 +272,7 @@ class NoteWindow : Window
             Foreground = Pal.InkB,
             CaretBrush = Pal.InkB,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            UndoLimit = 64,
         };
         _title.TextChanged += (_, _) =>
         {
@@ -275,9 +281,12 @@ class NoteWindow : Window
             _deck.NoteActivity();
             _autosave.Stop(); _autosave.Start();
         };
-        _body.Document = new FlowDocument { PagePadding = new Thickness(0) };
+        // Initial load and styling are not user edits. Keeping their formatting
+        // operations in the undo manager retains a second graph of the document.
+        _body.IsUndoEnabled = false;
         LoadBody(_note.Body);
         ApplyMarkdown();
+        _body.IsUndoEnabled = true;
         _body.TextChanged += (_, _) =>
         {
             if (_applyingMarkdown) return;
@@ -290,7 +299,11 @@ class NoteWindow : Window
         _body.GotKeyboardFocus += (_, _) => ApplyMarkdown();
         _body.LostKeyboardFocus += (_, _) =>
             Dispatcher.BeginInvoke(new Action(ApplyMarkdown));
-        _autosave.Tick += (_, _) => { _autosave.Stop(); Save(); };
+        _autosave.Tick += (_, _) =>
+        {
+            _autosave.Stop();
+            Save();
+        };
         _body.PreviewMouseLeftButtonDown += OnBodyMouseDown;
 
         // Use the application-wide real ScrollBar template. It retains the
@@ -850,29 +863,30 @@ class NoteWindow : Window
         if (_applyingMarkdown) return;   // re-entrancy guard: caret/format writes
                                          // can re-fire TextChanged → infinite recursion
         _applyingMarkdown = true;
+        bool changeStarted = false;
         try
         {
             if (_body.Document == null) return;
+            // One undo unit is enough for a formatting refresh. Without this,
+            // every TextRange property assignment can retain another undo item.
+            _body.BeginChange();
+            changeStarted = true;
             var editingParagraph = CurrentEditingParagraph();
             _editingMarkdownParagraph = editingParagraph;
             var doc = _body.Document;
-            var all = new TextRange(doc.ContentStart, doc.ContentEnd);
-            all.ApplyPropertyValue(TextElement.FontWeightProperty, FontWeights.Normal);
-            all.ApplyPropertyValue(TextElement.FontStyleProperty, FontStyles.Normal);
-            all.ApplyPropertyValue(TextElement.FontFamilyProperty, new FontFamily("Segoe UI, Microsoft YaHei UI"));
-            all.ApplyPropertyValue(TextElement.ForegroundProperty, Pal.InkB);
-            all.ApplyPropertyValue(TextElement.FontSizeProperty, Settings.NoteFontSize);
-            all.ApplyPropertyValue(Inline.TextDecorationsProperty, null);
-            all.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Transparent);
             if (_note.UsesMarkdown)
                 Markdown.StyleDocument(doc, Pal, Settings.NoteFontSize,
                     editingParagraph);
             else
+            {
                 Markdown.RestoreSourceMarkers(doc);
+                Markdown.ResetDocument(doc, Pal.InkB, Settings.NoteFontSize);
+            }
         }
         catch (Exception ex) { Log($"[ApplyMarkdown EX] {ex}"); }
         finally
         {
+            if (changeStarted) _body.EndChange();
             _applyingMarkdown = false;
         }
     }
@@ -1043,6 +1057,21 @@ class NoteWindow : Window
     {
         _deactivationCheck?.Stop();
         _deactivationCheck = null;
+    }
+
+    void ReleaseWindowResources()
+    {
+        _autosave.Stop();
+        StopDeactivationCheck();
+        _transition?.Stop();
+        _transition = null;
+        _findMatches.Clear();
+        if (_windowSource != null)
+        {
+            _windowSource.RemoveHook(WindowHook);
+            _windowSource = null;
+        }
+        Content = null;
     }
 
     public void Dismiss()                       // click-away / idle → the whole deck goes to sleep

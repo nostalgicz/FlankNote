@@ -15,7 +15,7 @@
     <AssemblyName>FlankNote</AssemblyName>
     <Product>$(AssemblyName)</Product>
     <RootNamespace>FlankNote</RootNamespace>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Authors>nostalgicz</Authors>
     <RepositoryUrl>https://github.com/nostalgicz/FlankNote</RepositoryUrl>
     <ApplicationManifest>app.manifest</ApplicationManifest>
@@ -43,6 +43,11 @@
     <!-- Used for standards-compliant read-only previews. The hybrid editor keeps
          Markdown source editable while rendering inactive lines in place. -->
     <PackageReference Include="Markdig" Version="1.3.2" />
+  </ItemGroup>
+
+  <!-- Prefer a smaller managed heap for this low-throughput desktop utility. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
   </ItemGroup>
 
   <ItemGroup>

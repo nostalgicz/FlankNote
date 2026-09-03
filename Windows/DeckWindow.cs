@@ -9,6 +9,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Globalization;
+using Microsoft.Win32;
 
 namespace FlankNote;
 
@@ -50,12 +51,33 @@ class DeckWindow : Window
     FrameworkElement? _more;
     Rect _plusRect;
     DispatcherTimer? _revealAnim;
+    DispatcherTimer? _tabAnimation;
     readonly Dictionary<ScaleTransform, DispatcherTimer> _feedbackAnimations = [];
     Popup? _preview;
+    FlowDocumentScrollViewer? _previewViewer;
     DispatcherTimer? _previewTimer;
+    Rect _workArea;
+    int? _visualKey;
+
+    internal bool CanTrimMemory
+    {
+        get
+        {
+            if (_dragging || _geomAnim != null || _revealAnim != null
+                || _tabAnimation != null || _feedbackAnimations.Count > 0)
+                return false;
+            if (!_noteOpen) return _state == DeckState.Rest;
+
+            // A visible editor is still trim-safe while it is being read. Input
+            // restarts the shared timer, so no collection occurs while typing.
+            return App.OpenNote is { HasModalInteraction: false }
+                && DateTime.Now - _lastNoteActivity >= TimeSpan.FromSeconds(4.5);
+        }
+    }
 
     public DeckWindow()
     {
+        _workArea = DisplayService.WorkArea();
         Title = AppIdentity.DisplayName;
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -86,6 +108,14 @@ class DeckWindow : Window
         _poll.Start();
 
         NotesStore.I.Changed += Refresh;
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        Closed += (_, _) =>
+        {
+            _poll.Stop();
+            NotesStore.I.Changed -= Refresh;
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            StopTransientVisuals();
+        };
         Loaded += (_, _) =>
         {
             _lastCursor = CursorDip();
@@ -104,8 +134,18 @@ class DeckWindow : Window
     }
 
     // ── geometry ────────────────────────────────────────────
-    Rect Work => DisplayService.WorkArea();
+    Rect Work => _workArea;
     bool OnRight => !Settings.EdgeLeft;
+
+    void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            _workArea = DisplayService.WorkArea();
+            _visualKey = null;
+            Refresh();
+        }));
+    }
 
     Point CursorDip()
     {
@@ -153,8 +193,9 @@ class DeckWindow : Window
         if (s == DeckState.Rest && Settings.KeepDeckOpen) s = DeckState.Fan;
         if (_state == s) return;
         _state = s;
+        _visualKey = null;
         _geomAnim?.Stop();
-        _revealAnim?.Stop();
+        StopTransientVisuals();
         if (s == DeckState.Fan)
         {
             // the pill grows in place into the full-height deck — the window
@@ -367,6 +408,7 @@ class DeckWindow : Window
     // ── content: pill ───────────────────────────────────────
     void BuildPill()
     {
+        StopTransientVisuals();
         _cv.Children.Clear();
         _tabs.Clear(); _tabRects.Clear(); _plus = null; _more = null;
         _dragSlots.Clear();
@@ -400,13 +442,14 @@ class DeckWindow : Window
         Canvas.SetLeft(pill, OnRight ? RestWidth - Geom.PillWidth - Scale : Scale);
         Canvas.SetTop(pill, 0);
         _cv.Children.Add(pill);
+        _visualKey = CurrentVisualKey();
     }
 
     // ── content: fan ────────────────────────────────────────
     void BuildFan(bool staged)
     {
+        StopTransientVisuals();
         _cv.Children.Clear();
-        _revealAnim?.Stop();
         _tabs.Clear(); _tabRects.Clear(); _plus = null; _more = null;
         _dragSlots.Clear();
 
@@ -425,6 +468,7 @@ class DeckWindow : Window
         {
             BuildChips(visible, hiddenCount, x);
             if (staged) RevealFan();
+            _visualKey = CurrentVisualKey();
             return;
         }
 
@@ -487,6 +531,7 @@ class DeckWindow : Window
         _cv.Children.Add(_plus);
         _plusRect = new Rect(px, py, Geom.PlusSize, Geom.PlusSize);
         if (staged) RevealFan();
+        _visualKey = CurrentVisualKey();
     }
 
     // ── colour chips deck (the original's compact style) ────
@@ -729,17 +774,19 @@ class DeckWindow : Window
         element.MouseEnter += (_, _) =>
         {
             if (Settings.OpenOnHover) return;
-            _previewTimer?.Stop();
-            _previewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(360) };
-            _previewTimer.Tick += (_, _) =>
+            CancelPreviewTimer();
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(360) };
+            timer.Tick += (_, _) =>
             {
-                _previewTimer?.Stop();
+                timer.Stop();
+                if (ReferenceEquals(_previewTimer, timer)) _previewTimer = null;
                 if (element.IsMouseOver && !_dragging) ShowPreview(element, note);
             };
-            _previewTimer.Start();
+            _previewTimer = timer;
+            timer.Start();
         };
-        element.MouseLeave += (_, _) => { _previewTimer?.Stop(); HidePreview(); };
-        element.Unloaded += (_, _) => { _previewTimer?.Stop(); HidePreview(); };
+        element.MouseLeave += (_, _) => HidePreview();
+        element.Unloaded += (_, _) => HidePreview();
     }
 
     void ShowPreview(FrameworkElement target, Note note)
@@ -747,6 +794,7 @@ class DeckWindow : Window
         HidePreview();
         var progress = Tasks.Progress(note.Body, note.UsesMarkdown);
         var pal = note.Palette;
+        string previewText = PreviewExcerpt(note.Body);
         var paper = new LinearGradientBrush(
             new GradientStopCollection
             {
@@ -765,11 +813,11 @@ class DeckWindow : Window
         });
         content.Children.Add(titleRow);
         content.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(pal.Ink) { Opacity = 0.12 }, Margin = new Thickness(0, 10, 0, 9) });
-        content.Children.Add(new FlowDocumentScrollViewer
+        var viewer = new FlowDocumentScrollViewer
         {
             Document = note.UsesMarkdown
-                ? MarkdownPreview.CreateDocument(note.Body, pal, 12.5)
-                : MarkdownPreview.CreatePlainTextDocument(note.Body, pal, 12.5),
+                ? MarkdownPreview.CreateDocument(previewText, pal, 12.5)
+                : MarkdownPreview.CreatePlainTextDocument(previewText, pal, 12.5),
             Height = 82,
             IsToolBarVisible = false,
             IsSelectionEnabled = false,
@@ -783,7 +831,9 @@ class DeckWindow : Window
             FontSize = 12.5,
             Foreground = new SolidColorBrush(pal.Ink) { Opacity = 0.78 },
             Margin = new Thickness(0, 0, 0, 1),
-        });
+        };
+        _previewViewer = viewer;
+        content.Children.Add(viewer);
         if (progress.Total > 0)
         {
             var progressRow = new Grid { Margin = new Thickness(0, 12, 0, 0) };
@@ -841,7 +891,54 @@ class DeckWindow : Window
 
     void HidePreview()
     {
-        if (_preview != null) { _preview.IsOpen = false; _preview = null; }
+        CancelPreviewTimer();
+        if (_previewViewer != null)
+        {
+            _previewViewer.Document = null;
+            _previewViewer = null;
+        }
+        if (_preview != null)
+        {
+            _preview.IsOpen = false;
+            _preview.Child = null;
+            _preview.PlacementTarget = null;
+            _preview = null;
+        }
+    }
+
+    void CancelPreviewTimer()
+    {
+        _previewTimer?.Stop();
+        _previewTimer = null;
+    }
+
+    void StopTransientVisuals()
+    {
+        _revealAnim?.Stop();
+        _revealAnim = null;
+        _tabAnimation?.Stop();
+        _tabAnimation = null;
+        foreach (var timer in _feedbackAnimations.Values) timer.Stop();
+        _feedbackAnimations.Clear();
+        HidePreview();
+    }
+
+    internal static string PreviewExcerpt(string? body, int maxCharacters = 1200, int maxLines = 16)
+    {
+        if (string.IsNullOrEmpty(body) || maxCharacters <= 0 || maxLines <= 0)
+            return string.Empty;
+
+        int length = Math.Min(body.Length, maxCharacters);
+        int lines = 1;
+        for (int i = 0; i < length; i++)
+        {
+            if (body[i] != '\n' || ++lines <= maxLines) continue;
+            length = i;
+            break;
+        }
+        if (length < body.Length && length > 0 && char.IsHighSurrogate(body[length - 1]))
+            length--;
+        return body[..length].TrimEnd('\r', '\n');
     }
 
     public void OpenAllNotes()
@@ -858,6 +955,30 @@ class DeckWindow : Window
 
     double LongestLabel(List<Note> notes)
         => notes.Count == 0 ? 0 : notes.Max(n => Geom.LabelWidth(n.DisplayTitle, TabFace, TabFontSize));
+
+    int CurrentVisualKey()
+    {
+        var key = new HashCode();
+        key.Add(_state);
+        key.Add(_showAll);
+        key.Add(Settings.DeckStyle);
+        key.Add(Settings.DeckScale);
+        key.Add(Settings.EdgeLeft);
+        foreach (var note in NotesStore.I.Notes)
+        {
+            if (note.Archived) continue;
+            key.Add(note.Id);
+            key.Add(note.Order);
+            key.Add(note.Color);
+            key.Add(note.CustomColor);
+            if (_state == DeckState.Fan)
+            {
+                key.Add(note.DisplayTitle);
+                key.Add(note.Pinned);
+            }
+        }
+        return key.ToHashCode();
+    }
 
     void HookHoverOpen(FrameworkElement element, Note note)
     {
@@ -1005,6 +1126,7 @@ class DeckWindow : Window
     /// no animation clocks on a layered window), then optionally rebuild.</summary>
     void AnimateTabsTo(List<(FrameworkElement El, Note Note, double BaseY)> all, List<double> goals, Action? done = null, int ms = 320)
     {
+        _tabAnimation?.Stop();
         var t0 = DateTime.Now;
         var from = all.Select(t => Canvas.GetTop(t.El)).ToArray();
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
@@ -1014,8 +1136,14 @@ class DeckWindow : Window
             double e = UiTheme.Spring(t, 0.80);
             for (int i = 0; i < all.Count; i++)
                 Canvas.SetTop(all[i].El, from[i] + (goals[i] - from[i]) * e);
-            if (t >= 1) { timer.Stop(); done?.Invoke(); }
+            if (t >= 1)
+            {
+                timer.Stop();
+                if (ReferenceEquals(_tabAnimation, timer)) _tabAnimation = null;
+                done?.Invoke();
+            }
         };
+        _tabAnimation = timer;
         timer.Start();
     }
 
@@ -1058,6 +1186,7 @@ class DeckWindow : Window
     // ── notes ───────────────────────────────────────────────
     public void OpenNote(Note note)
     {
+        HidePreview();
         if (App.OpenNote is { } current)
         {
             if (current.NoteId == note.Id)
@@ -1103,6 +1232,7 @@ class DeckWindow : Window
             _noteOpen = false;
             _outsideNoteSince = null;
             _pointerVisitedNoteArea = false;
+            MemoryCleanup.Schedule(Dispatcher);
         }
     }
 
@@ -1110,6 +1240,7 @@ class DeckWindow : Window
     {
         _lastNoteActivity = DateTime.Now;
         _outsideNoteSince = null;
+        MemoryCleanup.Schedule(Dispatcher);
     }
 
     public void DismissAll()
@@ -1149,6 +1280,7 @@ class DeckWindow : Window
 
     public void Refresh()
     {
+        if (_visualKey == CurrentVisualKey()) return;
         if (_state == DeckState.Rest)
         {
             LayoutRest();
@@ -1165,8 +1297,9 @@ class DeckWindow : Window
     {
         _geomAnim?.Stop();
         _geomAnim = null;
-        _revealAnim?.Stop();
-        _revealAnim = null;
+        StopTransientVisuals();
+        _workArea = DisplayService.WorkArea();
+        _visualKey = null;
         if (Settings.KeepDeckOpen || _state == DeckState.Fan || _noteOpen)
         {
             _state = DeckState.Fan;

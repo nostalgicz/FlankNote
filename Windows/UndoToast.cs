@@ -72,6 +72,7 @@ class UndoToast : Window
             if (--_left <= 0) { tick.Stop(); Close(); }
             else _undo.Content = $"{Loc.T("Undo", "撤销")} ({_left})";
         };
+        Closed += (_, _) => tick.Stop();
         tick.Start();
 
         SourceInitialized += (_, _) => Native.NoActivate(this);

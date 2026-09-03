@@ -66,6 +66,8 @@ partial class App : Application
 
         Dispatcher.BeginInvoke(StartBackgroundUpdateCheck,
             System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        Dispatcher.BeginInvoke(() => MemoryCleanup.Schedule(Dispatcher),
+            System.Windows.Threading.DispatcherPriority.ContextIdle);
     }
 
     static void ShowFirstInstallWelcome()
@@ -130,6 +132,12 @@ partial class App : Application
     {
         try { await GetLatestReleaseAsync().ConfigureAwait(false); }
         catch (Exception ex) { ReportError($"Background update check failed: {ex}"); }
+        finally
+        {
+            var dispatcher = Current?.Dispatcher;
+            if (dispatcher is { HasShutdownStarted: false })
+                await dispatcher.InvokeAsync(() => MemoryCleanup.Schedule(dispatcher));
+        }
     }
 
     internal static void OpenRepository()

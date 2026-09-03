@@ -38,6 +38,9 @@ static class Native
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
     [DllImport("user32.dll")] public static extern uint GetDpiForSystem();
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("psapi.dll", SetLastError = true)] static extern bool EmptyWorkingSet(IntPtr hProcess);
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
                                     int x, int y, int cx, int cy, uint flags);
@@ -53,6 +56,20 @@ static class Native
         SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(ex.ToInt64() | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW));
     }
 
+    public static void MarkToolWindow(Window w)
+    {
+        var h = new WindowInteropHelper(w).Handle;
+        var ex = GetWindowLongPtr(h, GWL_EXSTYLE);
+        SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(ex.ToInt64() | WS_EX_TOOLWINDOW));
+    }
+
+    public static void PositionTopmost(Window w, int x, int y, int width, int height)
+    {
+        var h = new WindowInteropHelper(w).Handle;
+        if (h == IntPtr.Zero) return;
+        SetWindowPos(h, HWND_TOPMOST, x, y, width, height, SWP_NOOWNERZORDER);
+    }
+
     /// <summary>Reassert the native topmost band without moving, resizing or activating.</summary>
     public static void EnsureTopmost(Window w)
         => SetTopmost(w, true);
@@ -64,5 +81,12 @@ static class Native
         if (h == IntPtr.Zero) return;
         SetWindowPos(h, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
+    /// <summary>Return cold private pages to Windows after a long idle period.</summary>
+    public static void TrimCurrentProcessWorkingSet()
+    {
+        try { EmptyWorkingSet(GetCurrentProcess()); }
+        catch { /* best effort; unsupported or restricted systems keep the cache */ }
     }
 }

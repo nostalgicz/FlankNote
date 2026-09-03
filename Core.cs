@@ -64,9 +64,9 @@ record struct NoteColor(string Name, Color Paper, Color Dash, Color Ink)
 
     public static string ToHex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
 
-    public SolidColorBrush PaperB => new(Paper);
-    public SolidColorBrush DashB => new(Dash);
-    public SolidColorBrush InkB => new(Ink);
+    public SolidColorBrush PaperB => UiTheme.Tint(Paper);
+    public SolidColorBrush DashB => UiTheme.Tint(Dash);
+    public SolidColorBrush InkB => UiTheme.Tint(Ink);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ static class Tasks
     public const char Open = '☐', Done = '☑';
     static readonly System.Text.RegularExpressions.Regex MarkdownTask = new(
         @"^(?<prefix>\s*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+))(?<box>\[[ xX]\])(?<space>[ \t]+|$)",
-        System.Text.RegularExpressions.RegexOptions.Compiled);
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     public static bool TryGetMarkdownMarker(string line, out int boxStart, out int markerEnd, out bool done)
     {
