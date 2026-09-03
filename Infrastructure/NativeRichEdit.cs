@@ -61,6 +61,8 @@ sealed class NativeRichEdit : HwndHost
     const int VK_RETURN = 0x0D;
     const int VK_ESCAPE = 0x1B;
     const int WM_KEYDOWN = 0x0100;
+    const int WM_KEYUP = 0x0101;
+    const int WM_CHAR = 0x0102;
     const int WM_LBUTTONDOWN = 0x0201;
     const int MK_CONTROL = 0x0008;
     const int MK_SHIFT = 0x0004;
@@ -238,6 +240,21 @@ sealed class NativeRichEdit : HwndHost
     {
         base.OnGotKeyboardFocus(e);
         if (_handle != IntPtr.Zero) NativeMethods.SetFocus(_handle);
+    }
+
+    protected override bool TranslateAcceleratorCore(ref MSG msg, ModifierKeys modifiers)
+    {
+        // HwndHost owns the WPF keyboard route. Forward key messages to the
+        // native child so RichEdit receives normal typing and IME input even
+        // when the parent window is borderless/transparent.
+        if (_handle != IntPtr.Zero &&
+            (msg.message == WM_KEYDOWN || msg.message == WM_KEYUP || msg.message == WM_CHAR))
+        {
+            NativeMethods.TranslateMessage(ref msg);
+            NativeMethods.DispatchMessage(ref msg);
+            return true;
+        }
+        return base.TranslateAcceleratorCore(ref msg, modifiers);
     }
 
     public void FocusEditor()
@@ -533,6 +550,8 @@ sealed class NativeRichEdit : HwndHost
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool DestroyWindow(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern IntPtr SetFocus(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern short GetKeyState(int key);
+        [DllImport("user32.dll")] internal static extern bool TranslateMessage(ref MSG msg);
+        [DllImport("user32.dll")] internal static extern IntPtr DispatchMessage(ref MSG msg);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, string lParam);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
