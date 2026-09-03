@@ -523,12 +523,13 @@ sealed class NativeRichEdit : HwndHost
         internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, string lParam);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, ref GETTEXTEX wParam, StringBuilder lParam);
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", EntryPoint = "SendMessage", CharSet = CharSet.Unicode)]
         internal static extern int SendMessageInt(IntPtr hwnd, int msg, ref GETTEXTLENGTHEX wParam, IntPtr lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, ref CHARRANGE lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, ref CHARFORMAT2 lParam);
-        [DllImport("user32.dll")] internal static extern IntPtr SendMessageCharFromPos(
+        [DllImport("user32.dll", EntryPoint = "SendMessage", CharSet = CharSet.Unicode)]
+        internal static extern IntPtr SendMessageCharFromPos(
             IntPtr hwnd, int msg, IntPtr wParam, ref POINTL lParam);
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y,
