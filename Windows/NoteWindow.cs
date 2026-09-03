@@ -916,9 +916,22 @@ class NoteWindow : Window
         return false;
     }
 
-    void OnBodyMouseDown(Point _, bool __)
+    void OnBodyMouseDown(Point point, bool control)
     {
         _deck.NoteActivity();
+        if (!_note.UsesMarkdown) return;
+        int offset = _body.TextOffsetAt(point);
+        string text = _body.Text;
+        var lineStart = text.LastIndexOf('\n', Math.Max(0, offset - 1)) + 1;
+        var lineEnd = text.IndexOf('\n', offset);
+        if (lineEnd < 0) lineEnd = text.Length;
+        var line = text.Substring(lineStart, lineEnd - lineStart).TrimEnd('\r');
+        if (Tasks.IsMarkerOffset(line, Math.Clamp(offset - lineStart, 0, line.Length)))
+        {
+            _body.ReplaceRange(lineStart, line.Length, Tasks.Toggle(line));
+            return;
+        }
+        if (control) NativeMarkdownStyler.OpenLinkAt(_body, offset);
     }
 
     // ── find (Ctrl+F) ──────────────────────────────────────

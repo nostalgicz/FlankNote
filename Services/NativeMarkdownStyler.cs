@@ -18,6 +18,36 @@ static class NativeMarkdownStyler
     static readonly Regex Fence = new(@"^\s*`{3,}", RegexOptions.CultureInvariant);
     static readonly Regex Rule = new(@"^\s*(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})\s*$", RegexOptions.CultureInvariant);
 
+    public static bool TryGetLinkAt(string text, int offset, out string url)
+    {
+        foreach (Match match in Link.Matches(text))
+        {
+            var label = match.Groups["label"];
+            if (offset >= label.Index && offset <= label.Index + label.Length)
+            {
+                url = match.Groups["close"].Value[2..^1];
+                return true;
+            }
+        }
+        url = string.Empty;
+        return false;
+    }
+
+    public static void OpenLinkAt(NativeRichEdit editor, int offset)
+    {
+        if (!TryGetLinkAt(editor.Text, offset, out var value)) return;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https" or "mailto")) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri)
+            {
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex) { App.ReportError($"Opening link failed: {ex}"); }
+    }
+
     public static int ActiveLine(string text, int selectionStart)
     {
         selectionStart = Math.Clamp(selectionStart, 0, text.Length);

@@ -39,6 +39,7 @@ sealed class NativeRichEdit : HwndHost
     const int EM_SETTEXTEX = 0x0461;
     const int EM_GETTEXTEX = 0x045E;
     const int EM_GETTEXTLENGTHEX = 0x045F;
+    const int EM_CHARFROMPOS = 0x00D6;
     const int EM_SETCHARFORMAT_SELECTION = 0x0001;
     const int EM_SETOPTIONS_OR = 0x0002;
     const int ECO_AUTOVSCROLL = 0x0040;
@@ -68,6 +69,7 @@ sealed class NativeRichEdit : HwndHost
     bool _settingText;
     string _pendingText = string.Empty;
     Color _backgroundColor = Colors.White;
+    string? _offsetText;
     SubclassProc? _subclassProc;
 
     public event EventHandler? TextChanged;
@@ -143,6 +145,15 @@ sealed class NativeRichEdit : HwndHost
             return Math.Max(0, ToLogicalOffset(end) - ToLogicalOffset(start));
         }
         set { SetSelection(SelectionStart, value); }
+    }
+
+    public int TextOffsetAt(Point point)
+    {
+        if (_handle == IntPtr.Zero) return 0;
+        var nativePoint = new POINTL { x = (int)Math.Round(point.X), y = (int)Math.Round(point.Y) };
+        int native = NativeMethods.SendMessageCharFromPos(_handle, EM_CHARFROMPOS,
+            IntPtr.Zero, ref nativePoint).ToInt32();
+        return ToLogicalOffset(native);
     }
 
     protected override HandleRef BuildWindowCore(HandleRef hwndParent)
@@ -278,14 +289,20 @@ sealed class NativeRichEdit : HwndHost
     public void ApplyFormat(int start, int length, NativeCharFormat format)
     {
         if (_handle == IntPtr.Zero || length <= 0) return;
-        int savedStart = SelectionStart;
-        int savedEnd = savedStart + SelectionLength;
+        GetSelection(out int savedStart, out int savedEnd);
         SetSelection(start, start + length);
         format.Size = (int)Math.Round((double)Math.Max(1, format.Size));
         format.Native.cbSize = Marshal.SizeOf<CHARFORMAT2>();
         NativeMethods.SendMessage(_handle, EM_SETCHARFORMAT,
             new IntPtr(EM_SETCHARFORMAT_SELECTION), ref format.Native);
-        SetSelection(savedStart, savedEnd);
+        SetSelectionNative(savedStart, savedEnd);
+    }
+
+    public IDisposable BeginOffsetBatch(string logicalText)
+    {
+        var previous = _offsetText;
+        _offsetText = logicalText;
+        return new OffsetBatch(this, previous);
     }
 
     internal void GetSelection(out int start, out int end)
@@ -310,9 +327,16 @@ sealed class NativeRichEdit : HwndHost
         NativeMethods.SendMessage(_handle, EM_EXSETSEL, IntPtr.Zero, ref range);
     }
 
+    void SetSelectionNative(int start, int end)
+    {
+        if (_handle == IntPtr.Zero) return;
+        var range = new CHARRANGE { cpMin = Math.Max(0, start), cpMax = Math.Max(0, end) };
+        NativeMethods.SendMessage(_handle, EM_EXSETSEL, IntPtr.Zero, ref range);
+    }
+
     int ToNativeOffset(int logicalOffset)
     {
-        string text = Text;
+        string text = _offsetText ?? Text;
         logicalOffset = Math.Clamp(logicalOffset, 0, text.Length);
         int native = logicalOffset;
         for (int i = 0; i < logicalOffset; i++)
@@ -348,6 +372,26 @@ sealed class NativeRichEdit : HwndHost
         };
         NativeMethods.SendMessage(_handle, EM_GETTEXTEX, ref request, buffer);
         return buffer.ToString();
+    }
+
+    sealed class OffsetBatch : IDisposable
+    {
+        readonly NativeRichEdit _owner;
+        readonly string? _previous;
+        bool _disposed;
+
+        public OffsetBatch(NativeRichEdit owner, string? previous)
+        {
+            _owner = owner;
+            _previous = previous;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _owner._offsetText = _previous;
+        }
     }
 
     NativeCharFormat ToNative(NativeCharFormat value) => value;
@@ -423,6 +467,9 @@ sealed class NativeRichEdit : HwndHost
     [StructLayout(LayoutKind.Sequential)]
     internal struct CHARRANGE { public int cpMin; public int cpMax; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINTL { public int x; public int y; }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     internal struct CHARFORMAT2
     {
@@ -481,6 +528,8 @@ sealed class NativeRichEdit : HwndHost
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, ref CHARRANGE lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, ref CHARFORMAT2 lParam);
+        [DllImport("user32.dll")] internal static extern IntPtr SendMessageCharFromPos(
+            IntPtr hwnd, int msg, IntPtr wParam, ref POINTL lParam);
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y,
             int cx, int cy, int flags);
