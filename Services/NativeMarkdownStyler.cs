@@ -59,7 +59,7 @@ static class NativeMarkdownStyler
             }
             else if (!active && inFence)
             {
-                Format(editor, lineStart, length, NativeFormatKind.Code, ink);
+                Format(editor, lineStart, length, NativeFormatKind.Code, ink, baseSize: baseSize);
             }
             else if (!active)
             {
@@ -152,10 +152,11 @@ static class NativeMarkdownStyler
         => Format(editor, start, length, NativeFormatKind.Hidden, Colors.Transparent);
 
     static void Format(NativeRichEdit editor, int start, int length,
-                       NativeFormatKind kind, Color colour, int level = 0)
+                       NativeFormatKind kind, Color colour, int level = 0,
+                       double baseSize = 14)
     {
         if (length <= 0) return;
-        var format = NativeRichEdit.NativeCharFormat.Default(Rgb(colour), 14);
+        var format = NativeRichEdit.NativeCharFormat.Default(Rgb(colour), baseSize);
         format.Native.dwEffects = kind switch
         {
             NativeFormatKind.Bold => NativeRichEdit.NativeFormat.CFE_BOLD,
@@ -173,7 +174,7 @@ static class NativeMarkdownStyler
             _ => 0u,
         };
         if (kind == NativeFormatKind.Heading)
-            format.Native.yHeight = (int)Math.Round((double)((14 + Math.Max(0, 7 - level)) * 20));
+            format.Native.yHeight = (int)Math.Round((baseSize + Math.Max(0, 7 - level)) * 20.0);
         if (kind == NativeFormatKind.Code)
             format.Native.szFaceName = "Cascadia Mono";
         format.Native.cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeRichEdit.CHARFORMAT2>();

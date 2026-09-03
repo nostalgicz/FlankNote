@@ -37,6 +37,8 @@ sealed class NativeRichEdit : HwndHost
     const int EM_SCROLLCARET = 0x00B7;
     const int EM_SETLANGOPTIONS = 0x0478;
     const int EM_SETTEXTEX = 0x0461;
+    const int EM_GETTEXTEX = 0x045E;
+    const int EM_GETTEXTLENGTHEX = 0x045F;
     const int EM_SETCHARFORMAT_SELECTION = 0x0001;
     const int EM_SETOPTIONS_OR = 0x0002;
     const int ECO_AUTOVSCROLL = 0x0040;
@@ -99,11 +101,17 @@ sealed class NativeRichEdit : HwndHost
     {
         get
         {
-            if (_handle == IntPtr.Zero) return string.Empty;
-            int length = NativeMethods.GetWindowTextLength(_handle);
+            if (_handle == IntPtr.Zero) return _pendingText;
+            int length = GetTextLength();
             if (length <= 0) return string.Empty;
             var buffer = new StringBuilder(length + 1);
-            NativeMethods.GetWindowText(_handle, buffer, buffer.Capacity);
+            var request = new GETTEXTEX
+            {
+                cb = buffer.Capacity * 2,
+                flags = GT_USECRLF,
+                codepage = 1200,
+            };
+            NativeMethods.SendMessage(_handle, EM_GETTEXTEX, ref request, buffer);
             return buffer.ToString().Replace("\r\n", "\n", StringComparison.Ordinal);
         }
         set
@@ -223,6 +231,13 @@ sealed class NativeRichEdit : HwndHost
     {
         SetSelection(start, start + Math.Max(0, length));
         NativeMethods.SendMessage(_handle, EM_REPLACESEL, new IntPtr(1), replacement.Replace("\n", "\r\n", StringComparison.Ordinal));
+    }
+
+    int GetTextLength()
+    {
+        var request = new GETTEXTLENGTHEX { flags = GTL_NUMCHARS, codepage = 1200 };
+        return Math.Max(0, NativeMethods.SendMessageInt(_handle,
+            EM_GETTEXTLENGTHEX, ref request, IntPtr.Zero));
     }
 
     public void SetTextColour(Color colour)
@@ -389,6 +404,15 @@ sealed class NativeRichEdit : HwndHost
         public byte bReserved1;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct GETTEXTEX { public int cb; public int flags; public int codepage; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct GETTEXTLENGTHEX { public int flags; public int codepage; }
+
+    const int GT_USECRLF = 1;
+    const int GTL_NUMCHARS = 8;
+
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     delegate IntPtr SubclassProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam,
                                  UIntPtr id, UIntPtr data);
@@ -405,11 +429,11 @@ sealed class NativeRichEdit : HwndHost
         [DllImport("user32.dll")] internal static extern IntPtr SetFocus(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern short GetKeyState(int key);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        internal static extern int GetWindowTextLength(IntPtr hwnd);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        internal static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, string lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, ref GETTEXTEX wParam, StringBuilder lParam);
+        [DllImport("user32.dll")]
+        internal static extern int SendMessageInt(IntPtr hwnd, int msg, ref GETTEXTLENGTHEX wParam, IntPtr lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, ref CHARRANGE lParam);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, ref CHARFORMAT2 lParam);
