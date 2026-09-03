@@ -1,6 +1,5 @@
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -23,7 +22,7 @@ class NoteWindow : Window
     readonly DeckWindow _deck;
     readonly bool _onRight;
     readonly Rect _workArea;
-    readonly RichTextBox _body;
+    readonly NativeRichEdit _body;
     readonly TextBox _title;
     readonly TextBlock _saved;
     readonly Border _pinBtn;
@@ -39,7 +38,7 @@ class NoteWindow : Window
     readonly Grid _findBar = new();
     readonly TextBox _findBox = new();
     readonly TextBlock _findCount = new();
-    List<(Paragraph P, int Offset, string Text)> _findMatches = [];
+    List<(int Offset, string Text)> _findMatches = [];
     int _findIndex = -1;
 
     // palette sync: everything coloured by the note's palette gets refreshed together
@@ -57,7 +56,7 @@ class NoteWindow : Window
     HwndSource? _windowSource;
     bool _nativeResizing;
     bool _clampingBounds;
-    Paragraph? _editingMarkdownParagraph;
+    int _editingLine = -1;
 
     public bool Pinned => _note.Pinned;
     public bool HasModalInteraction => _modalUiOpen;
@@ -110,7 +109,6 @@ class NoteWindow : Window
         }));
         PreviewMouseDown += (_, _) => { ReassertOverlay(); _deck.NoteActivity(); };
         PreviewMouseMove += (_, _) => _deck.NoteActivity();
-        PreviewKeyDown += OnKey;        // Esc only — all custom shortcuts disabled on request
 
         // ── the sheet ─────────────────────────────────────
         var sheet = new Border
@@ -257,23 +255,15 @@ class NoteWindow : Window
         head.Children.Add(headTools);
         stack.Children.Add(head);
 
-        // One editor provides as-you-type Markdown: only the caret line exposes source markers.
-        // Passing the document into the constructor avoids creating and then
-        // discarding RichTextBox's default FlowDocument.
-        _body = new RichTextBox(new FlowDocument { PagePadding = new Thickness(0) })
+        // The expanded editor is a native RichEdit window. It keeps the text
+        // buffer and undo tree out of WPF's managed FlowDocument graph.
+        _body = new NativeRichEdit
         {
-            Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0),
-            FontFamily = UiTheme.Font,
             FontSize = Settings.NoteFontSize,
-            AcceptsReturn = true,
-            AcceptsTab = true,
-            Padding = new Thickness(15, 6, 15, 10),
             Foreground = Pal.InkB,
             CaretBrush = Pal.InkB,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            UndoLimit = 64,
         };
+        _body.SetBackgroundColour(Pal.Paper);
         _title.TextChanged += (_, _) =>
         {
             if (_settingTitle || _closing) return;
@@ -281,12 +271,7 @@ class NoteWindow : Window
             _deck.NoteActivity();
             _autosave.Stop(); _autosave.Start();
         };
-        // Initial load and styling are not user edits. Keeping their formatting
-        // operations in the undo manager retains a second graph of the document.
-        _body.IsUndoEnabled = false;
         LoadBody(_note.Body);
-        ApplyMarkdown();
-        _body.IsUndoEnabled = true;
         _body.TextChanged += (_, _) =>
         {
             if (_applyingMarkdown) return;
@@ -304,11 +289,9 @@ class NoteWindow : Window
             _autosave.Stop();
             Save();
         };
-        _body.PreviewMouseLeftButtonDown += OnBodyMouseDown;
-
-        // Use the application-wide real ScrollBar template. It retains the
-        // restrained appearance while supporting thumb drag and track clicks.
-        _body.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+        _body.NativeKeyDown += OnNativeKeyDown;
+        _body.NativeMouseDown += OnBodyMouseDown;
+        _body.Loaded += (_, _) => ApplyMarkdown();
         Grid.SetRow(_body, 2);
         stack.Children.Add(_body);
 
@@ -444,7 +427,7 @@ class NoteWindow : Window
         PersistWindowSize(save: true);
         _deck.NoteActivity();
         ReassertOverlay();
-        _body.Focus();
+        _body.FocusEditor();
     }
 
     void UpdateGutterLabelBounds()
@@ -670,7 +653,7 @@ class NoteWindow : Window
             _note.CustomColor = null;
             NotesStore.I.Update(_note);
             RebuildVisual();                    // recolour the whole note together
-            _body.Focus();
+            _body.FocusEditor();
         }
         catch (Exception ex) { Log($"[SetColor EX] {ex}"); }
     }
@@ -734,7 +717,7 @@ class NoteWindow : Window
             _modalUiOpen = false;
             ReassertOverlay();
             Activate();
-            _body.Focus();
+            _body.FocusEditor();
         }
     }
 
@@ -784,19 +767,10 @@ class NoteWindow : Window
 
     // ── body loading / saving ──────────────────────────────
     void LoadBody(string text)
-    {
-        foreach (var line in text.Split('\n'))
-            _body.Document.Blocks.Add(new Paragraph(new Run(line.TrimEnd('\r'))) { Margin = new Thickness(0) });
-    }
+        => _body.Text = text;
 
     string BodyText()
-    {
-        var sb = new System.Text.StringBuilder();
-        foreach (Block b in _body.Document.Blocks)
-            if (b is Paragraph p)
-                sb.Append(Markdown.SourceText(p)).Append('\n');
-        return sb.ToString().TrimEnd('\n');
-    }
+        => _body.Text;
 
     public void Save()
     {
@@ -825,7 +799,7 @@ class NoteWindow : Window
     {
         Save();
         _note.MarkdownEnabled = !_note.UsesMarkdown;
-        _body.Focus();
+        _body.FocusEditor();
         ApplyMarkdown();
         NotesStore.I.Update(_note);
         UpdateModeButton();
@@ -846,14 +820,14 @@ class NoteWindow : Window
 
     bool _applyingMarkdown;
 
-    Paragraph? CurrentEditingParagraph()
+    int CurrentEditingLine()
         => _body.IsKeyboardFocusWithin
-            ? Markdown.ParagraphAt(_body.CaretPosition)
-            : null;
+            ? NativeMarkdownStyler.ActiveLine(_body.Text, _body.SelectionStart)
+            : -1;
 
     void ApplyMarkdownIfLineChanged()
     {
-        if (!ReferenceEquals(CurrentEditingParagraph(), _editingMarkdownParagraph))
+        if (CurrentEditingLine() != _editingLine)
             ApplyMarkdown();
     }
 
@@ -863,67 +837,88 @@ class NoteWindow : Window
         if (_applyingMarkdown) return;   // re-entrancy guard: caret/format writes
                                          // can re-fire TextChanged → infinite recursion
         _applyingMarkdown = true;
-        bool changeStarted = false;
         try
         {
-            if (_body.Document == null) return;
-            // One undo unit is enough for a formatting refresh. Without this,
-            // every TextRange property assignment can retain another undo item.
-            _body.BeginChange();
-            changeStarted = true;
-            var editingParagraph = CurrentEditingParagraph();
-            _editingMarkdownParagraph = editingParagraph;
-            var doc = _body.Document;
-            if (_note.UsesMarkdown)
-                Markdown.StyleDocument(doc, Pal, Settings.NoteFontSize,
-                    editingParagraph);
-            else
-            {
-                Markdown.RestoreSourceMarkers(doc);
-                Markdown.ResetDocument(doc, Pal.InkB, Settings.NoteFontSize);
-            }
+            _editingLine = CurrentEditingLine();
+            NativeMarkdownStyler.Style(_body, _note.UsesMarkdown, Pal.Ink,
+                Pal.Dash, _editingLine, Settings.NoteFontSize);
         }
         catch (Exception ex) { Log($"[ApplyMarkdown EX] {ex}"); }
         finally
         {
-            if (changeStarted) _body.EndChange();
             _applyingMarkdown = false;
         }
     }
 
     // ── tasks ──────────────────────────────────────────────
-    Paragraph? ParagraphAtCaret()
-        => Markdown.ParagraphAt(_body.CaretPosition);
-
     void ToggleTaskAtCaret()
     {
         try
         {
-            var p = ParagraphAtCaret();
-            if (p == null) return;
-            var text = new TextRange(p.ContentStart, p.ContentEnd).Text;
-            if (text.Trim().Length == 0) { ReplaceParagraphText(p, "☐ "); return; }
+            GetCurrentLine(out int lineStart, out int lineLength, out string text);
+            if (text.Trim().Length == 0) { _body.ReplaceRange(lineStart, lineLength, "☐ "); return; }
             bool isNativeTask = text.StartsWith(Tasks.Open + " ") || text.StartsWith(Tasks.Done + " ");
             string nl = isNativeTask || (_note.UsesMarkdown && Tasks.IsTask(text))
                 ? Tasks.Toggle(text)
                 : "☐ " + text;
-            ReplaceParagraphText(p, nl);
+            _body.ReplaceRange(lineStart, lineLength, nl);
+            _body.Select(lineStart + nl.Length, 0);
         }
         catch (Exception ex) { Log($"[ToggleTaskAtCaret EX] {ex}"); }
     }
 
-    void ReplaceParagraphText(Paragraph p, string text)
+    void GetCurrentLine(out int start, out int length, out string text)
     {
-        var range = new TextRange(p.ContentStart, p.ContentEnd);
-        range.Text = text;
-        _body.CaretPosition = Markdown.PositionAtTextOffset(p, text.Length);
+        string body = _body.Text;
+        int caret = Math.Clamp(_body.SelectionStart, 0, body.Length);
+        start = body.LastIndexOf('\n', Math.Max(0, caret - 1)) + 1;
+        int end = body.IndexOf('\n', caret);
+        if (end < 0) end = body.Length;
+        length = Math.Max(0, end - start);
+        text = body.Substring(start, length).TrimEnd('\r');
     }
 
-    void OnBodyMouseDown(object sender, MouseButtonEventArgs e)
+    bool HandleTaskReturn(ModifierKeys modifiers)
     {
-        if (Markdown.TryOpenLink(_body, e, _note.UsesMarkdown)) return;
-        if (Markdown.TryToggleTaskAtPoint(_body, e, _note.UsesMarkdown))
-            _deck.NoteActivity();
+        if (modifiers != ModifierKeys.None || _body.SelectionLength != 0) return false;
+        GetCurrentLine(out int lineStart, out int lineLength, out string text);
+        if ((!_note.UsesMarkdown && !text.StartsWith(Tasks.Open + " ")
+                && !text.StartsWith(Tasks.Done + " ")) || !Tasks.IsTask(text))
+            return false;
+        int offset = Math.Clamp(_body.SelectionStart - lineStart, 0, text.Length);
+        if (Tasks.Strip(text).Trim().Length == 0)
+        {
+            _body.ReplaceRange(lineStart, lineLength, string.Empty);
+            _body.Select(lineStart, 0);
+        }
+        else
+        {
+            string before = text[..offset];
+            string after = text[offset..];
+            string continuation = Tasks.Continuation(text, after);
+            _body.ReplaceRange(lineStart, lineLength, before + "\n" + continuation);
+            _body.Select(lineStart + before.Length + 1 +
+                Tasks.ContentOffset(continuation), 0);
+        }
+        return true;
+    }
+
+    bool OnNativeKeyDown(NativeRichEdit.NativeKeyEvent e)
+    {
+        _deck.NoteActivity();
+        if (e.Key == 0x0D && HandleTaskReturn(e.Modifiers)) return true;
+        if (e.Key == 0x1B)
+        {
+            if (_findBar.Visibility == Visibility.Visible) ToggleFindBar();
+            else SaveAndClose();
+            return true;
+        }
+        return false;
+    }
+
+    void OnBodyMouseDown(Point _, bool __)
+    {
+        _deck.NoteActivity();
     }
 
     // ── find (Ctrl+F) ──────────────────────────────────────
@@ -934,7 +929,7 @@ class NoteWindow : Window
             bool show = _findBar.Visibility != Visibility.Visible;
             _findBar.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
             if (show) { _findBox.Focus(); _findBox.SelectAll(); }
-            else _body.Focus();
+            else _body.FocusEditor();
         }
         catch (Exception ex) { Log($"[ToggleFindBar EX] {ex}"); }
     }
@@ -947,16 +942,12 @@ class NoteWindow : Window
             _findIndex = -1;
             string q = _findBox.Text;
             if (q.Length == 0) { _findCount.Text = ""; return; }
-            foreach (Block b in _body.Document.Blocks)
+            string body = _body.Text;
+            int i = 0;
+            while ((i = body.IndexOf(q, i, StringComparison.CurrentCultureIgnoreCase)) >= 0)
             {
-                if (b is not Paragraph p) continue;
-                var t = Markdown.SourceText(p);
-                int i = 0;
-                while ((i = t.IndexOf(q, i, StringComparison.CurrentCultureIgnoreCase)) >= 0)
-                {
-                    _findMatches.Add((p, i, q));
-                    i += q.Length;
-                }
+                _findMatches.Add((i, q));
+                i += q.Length;
             }
             UpdateFindCount();
         }
@@ -976,33 +967,14 @@ class NoteWindow : Window
         _findIndex = forward
             ? (_findIndex + 1) % _findMatches.Count
             : (_findIndex <= 0 ? _findMatches.Count - 1 : _findIndex - 1);
-        var (p, offset, q) = _findMatches[_findIndex];
-                var start = Markdown.PositionAtTextOffset(p, offset);
-                var end = Markdown.PositionAtTextOffset(p, offset + q.Length);
-        if (start == null || end == null) return;
-        _body.Selection.Select(start, end);
-        _body.ScrollToVerticalOffset(0);   // keep it simple; Selection scrolls into view on focus
+        var (offset, q) = _findMatches[_findIndex];
+        _body.Select(offset, q.Length);
         _findBox.Focus();
         UpdateFindCount();
     }
 
-    // ── keyboard ─────────────────────────────────────────
-    // All custom shortcuts are disabled on request — the only key handled
-    // is Esc (close), since the sheet has no close button.
-    void OnKey(object sender, KeyEventArgs e)
-    {
-        _deck.NoteActivity();
-        if (e.Key == Key.Return && Markdown.HandleTaskReturn(_body, _note.UsesMarkdown))
-        {
-            e.Handled = true;
-            return;
-        }
-        if (e.Key == Key.Escape)
-        {
-            if (_findBar.Visibility == Visibility.Visible) { ToggleFindBar(); e.Handled = true; return; }
-            SaveAndClose(); e.Handled = true;
-        }
-    }
+    // Keyboard handling is attached to the native child so Return and Escape
+    // are intercepted before RichEdit mutates its text buffer.
 
     // ── lifecycle ──────────────────────────────────────────
     void OnDeactivated()
@@ -1168,6 +1140,7 @@ class NoteWindow : Window
         _saved.Foreground = new SolidColorBrush(Pal.Ink) { Opacity = 0.42 };
         _body.Foreground = Pal.InkB;
         _body.CaretBrush = Pal.InkB;
+        _body.SetBackgroundColour(Pal.Paper);
         _findBar.Background = new SolidColorBrush(Pal.Dash) { Opacity = 0.12 };
         _findBox.Foreground = Pal.InkB;
         _findBox.CaretBrush = Pal.InkB;
