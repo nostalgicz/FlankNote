@@ -291,7 +291,15 @@ class NoteWindow : Window
         };
         _body.NativeKeyDown += OnNativeKeyDown;
         _body.NativeMouseDown += OnBodyMouseDown;
-        _body.Loaded += (_, _) => ApplyMarkdown();
+        _body.Loaded += (_, _) =>
+        {
+            ApplyMarkdown();
+            // The native child is created during layout, after Show/Activate
+            // may have already selected the deck. Focus it on the next input
+            // turn so a newly opened note is immediately editable.
+            Dispatcher.BeginInvoke(DispatcherPriority.Input,
+                new Action(_body.FocusEditor));
+        };
         Grid.SetRow(_body, 2);
         stack.Children.Add(_body);
 

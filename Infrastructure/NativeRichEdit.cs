@@ -33,6 +33,7 @@ sealed class NativeRichEdit : HwndHost
     const int EM_HIDESELECTION = 0x043F;
     const int EM_SETMODIFY = 0x00B9;
     const int EM_GETMODIFY = 0x00B8;
+    const int EM_SETREADONLY = 0x00CF;
     const int EM_REPLACESEL = 0x00C2;
     const int EM_SCROLLCARET = 0x00B7;
     const int EM_SETLANGOPTIONS = 0x0478;
@@ -80,6 +81,14 @@ sealed class NativeRichEdit : HwndHost
     Brush _foreground = Brushes.Black;
     Brush _caretBrush = Brushes.Black;
     double _fontSize = 14;
+
+    public NativeRichEdit()
+    {
+        // HwndHost inherits FrameworkElement's non-focusable default. The
+        // native child must be reachable through both a mouse click and Tab.
+        Focusable = true;
+        KeyboardNavigation.SetIsTabStop(this, true);
+    }
 
     public Brush Foreground
     {
@@ -168,6 +177,7 @@ sealed class NativeRichEdit : HwndHost
 
         NativeMethods.SendMessage(_handle, EM_SETOPTIONS, new IntPtr(EM_SETOPTIONS_OR),
             new IntPtr(ECO_AUTOVSCROLL | ECO_AUTOHSCROLL));
+        NativeMethods.SendMessage(_handle, EM_SETREADONLY, IntPtr.Zero, IntPtr.Zero);
         NativeMethods.SendMessage(_handle, EM_EXLIMITTEXT, IntPtr.Zero, new IntPtr(4 * 1024 * 1024));
         NativeMethods.SendMessage(_handle, EM_SETUNDOLIMIT, IntPtr.Zero, new IntPtr(64));
         NativeMethods.SendMessage(_handle, EM_SETLANGOPTIONS, IntPtr.Zero, new IntPtr(SES_EXTENDBACKCOLOR));
@@ -409,6 +419,10 @@ sealed class NativeRichEdit : HwndHost
         }
         else if (msg == WM_LBUTTONDOWN)
         {
+            // HwndHost does not always transfer focus to the child when the
+            // parent is a borderless transparent window. Do it before the
+            // click reaches RichEdit so typing starts immediately.
+            NativeMethods.SetFocus(hwnd);
             int x = unchecked((short)(lParam.ToInt64() & 0xFFFF));
             int y = unchecked((short)((lParam.ToInt64() >> 16) & 0xFFFF));
             bool control = (wParam.ToInt32() & MK_CONTROL) != 0;
